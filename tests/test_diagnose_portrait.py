@@ -17,6 +17,12 @@ SPEC.loader.exec_module(diag)
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_normalization_is_opt_in(self):
+        base = ['--workspace', '.', '--source', 's.jpg', '--driving', 'd.mp4',
+                '--output-dir', 'new-case']
+        self.assertFalse(diag.parser().parse_args(base).normalize_lip)
+        self.assertTrue(diag.parser().parse_args(base + ['--normalize-lip']).normalize_lip)
+
     def test_workspace_budget_cannot_be_relaxed(self):
         diag.validate_budget(384, 20)
         for limit in (20.001, 100, 0, -1, float("inf"), float("nan")):

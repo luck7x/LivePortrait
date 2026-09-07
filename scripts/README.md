@@ -25,6 +25,8 @@ python scripts/diagnose_portrait.py --workspace <workspace> --source <workspace>
   writes a motion template beside the driving file.
 - Defaults match `ArgumentConfig`. `--driving-multiplier` permits a single-factor
   sensitivity experiment; reduced motion is not by itself a quality improvement.
+  `--normalize-lip` opt-in enables the existing upstream control for a separate
+  experiment. It changes the source-mouth baseline; it is not a teeth restorer.
 - Workspace budget cannot be raised above 20 GiB by a CLI argument. The script
   checks usage at stages and during capture, reserves metadata headroom, and
   applies a temporary per-file size limit to video/audio encoder subprocesses.

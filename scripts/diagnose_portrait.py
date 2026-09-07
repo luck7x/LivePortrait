@@ -132,6 +132,8 @@ def parser():
     p.add_argument("--driving", required=True, type=Path)
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument("--driving-multiplier", type=float, default=1.0)
+    p.add_argument("--normalize-lip", action="store_true",
+                   help="Enable upstream lip normalization as a single-factor experiment")
     p.add_argument("--raw-budget-mib", type=int, default=384)
     p.add_argument("--workspace-budget-gib", type=float, default=20.0)
     return p
@@ -209,7 +211,8 @@ def run(options):
     shutil.copy2(driving, driving_copy)
     args = ArgumentConfig(source=str(source_copy), driving=str(driving_copy),
                           output_dir=str(output / "videos"),
-                          driving_multiplier=options.driving_multiplier)
+                          driving_multiplier=options.driving_multiplier,
+                          flag_normalize_lip=options.normalize_lip)
     inference_cfg = partial_fields(InferenceConfig, dataclasses.asdict(args))
     crop_cfg = partial_fields(CropConfig, dataclasses.asdict(args))
     info = {
