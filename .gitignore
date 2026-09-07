@@ -8,6 +8,17 @@ __pycache__/
 # Model weights
 **/*.pth
 **/*.onnx
+**/*.ckpt
+**/*.safetensors
+
+# Local-only diagnostics, datasets and credentials
+/.ua/
+/analysis/
+/runs/
+/data/
+**/raw_frames/
+.env
+.env.*
 
 pretrained_weights/*.md
 pretrained_weights/docs
