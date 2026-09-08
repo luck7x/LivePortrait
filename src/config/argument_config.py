@@ -23,6 +23,7 @@ class ArgumentConfig(PrintableConfig):
     device_id: int = 0  # gpu device id
     flag_force_cpu: bool = False  # force cpu inference, WIP!
     flag_normalize_lip: bool = False  # whether to let the lip to close state before animation, only take effect when flag_eye_retargeting and flag_lip_retargeting is False
+    lip_width_correction: float = 0.0 # experimental [0,1]: horizontal source-expression bias correction; relative photo-to-video only
     flag_source_video_eye_retargeting: bool = False  # when the input is a source video, whether to let the eye-open scalar of each frame to be the same as the first source frame before the animation, only take effect when flag_eye_retargeting and flag_lip_retargeting is False, may cause the inter-frame jittering
     flag_eye_retargeting: bool = False  # not recommend to be True, WIP; whether to transfer the eyes-open ratio of each driving frame to the source image or the corresponding source frame
     flag_lip_retargeting: bool = False  # not recommend to be True, WIP; whether to transfer the lip-open ratio of each driving frame to the source image or the corresponding source frame

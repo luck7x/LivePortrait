@@ -23,6 +23,7 @@ from .utils.crop import prepare_paste_back, paste_back
 from .utils.io import load_image_rgb, load_video, resize_to_limit, dump, load
 from .utils.helper import mkdir, basename, dct2device, is_video, is_template, remove_suffix, is_image, is_square_video, calc_motion_multiplier
 from .utils.filter import smooth
+from .utils.lip_width import LIP_KEYPOINTS, horizontal_lip_offset, validate_lip_width_correction
 from .utils.rprint import rlog as log
 # from .utils.viz import viz_lmk
 from .live_portrait_wrapper import LivePortraitWrapper
@@ -79,6 +80,14 @@ class LivePortraitPipeline(object):
         inf_cfg = self.live_portrait_wrapper.inference_cfg
         device = self.live_portrait_wrapper.device
         crop_cfg = self.cropper.crop_cfg
+        validate_lip_width_correction(inf_cfg.lip_width_correction)
+        if inf_cfg.lip_width_correction > 0 and (
+            not is_image(args.source) or not is_video(args.driving)
+            or not inf_cfg.flag_relative_motion
+            or inf_cfg.animation_region not in ('all', 'exp', 'lip')
+            or inf_cfg.flag_eye_retargeting or inf_cfg.flag_lip_retargeting
+        ):
+            raise ValueError('lip_width_correction requires relative photo-to-video without eye/lip retargeting')
 
         ######## load source input ########
         flag_is_source_video = False
@@ -437,6 +446,12 @@ class LivePortraitPipeline(object):
                     x_d_i_new = self.live_portrait_wrapper.stitching(x_s, x_d_i_new)
 
             x_d_i_new = x_s + (x_d_i_new - x_s) * inf_cfg.driving_multiplier
+            if inf_cfg.lip_width_correction > 0:
+                # Fixed horizontal offset only; keep v1 closure and motion formulas.
+                x_d_i_new[:, LIP_KEYPOINTS, 0] += horizontal_lip_offset(
+                    x_s_info['exp'], x_d_0_info['exp'], x_s_info['scale'],
+                    inf_cfg.lip_width_correction,
+                )
             out = self.live_portrait_wrapper.warp_decode(f_s, x_s, x_d_i_new)
             I_p_i = self.live_portrait_wrapper.parse_output(out['out'])[0]
             I_p_lst.append(I_p_i)
