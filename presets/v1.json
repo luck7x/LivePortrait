@@ -1,0 +1,30 @@
+{
+  "version": "v1",
+  "kind": "documented_inference_preset_not_finetuned_weights",
+  "core_baseline_commit": "9b294b3d0536135442ea73cb01e6cb3ca7029dd3",
+  "arguments": {
+    "flag_normalize_lip": true,
+    "flag_relative_motion": true,
+    "flag_stitching": true,
+    "flag_eye_retargeting": false,
+    "flag_lip_retargeting": false,
+    "flag_use_half_precision": true,
+    "flag_crop_driving_video": false,
+    "flag_do_crop": true,
+    "flag_pasteback": true,
+    "driving_option": "expression-friendly",
+    "driving_multiplier": 1.0,
+    "source_max_dim": 1280,
+    "flag_do_torch_compile": false
+  },
+  "export_workflow": {
+    "description": "Use a video-only stream-copy input, generate every frame, then mux the original audio without -shortest; verify frame count and audio packets.",
+    "implemented_in_upstream_pipeline": false
+  },
+  "limitations": [
+    "The upstream CLI does not automatically load this JSON; use the documented equivalent arguments.",
+    "Lip normalization changes the source-mouth baseline; it is not a tooth-detail restorer.",
+    "Small mouth openings may be suppressed; validate against the driving video.",
+    "No new weights or training; no general multi-identity quality guarantee."
+  ]
+}
