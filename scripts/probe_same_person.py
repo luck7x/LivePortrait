@@ -50,6 +50,10 @@ def run(options):
     count = validate_probe(meta)
     if meta['streams'][0]['width'] != meta['streams'][0]['height']:
         raise ValueError('Use a square face-centered clip; no automatic face crop in this test')
+    if options.appearance_size not in (256, 512):
+        raise ValueError('Only 256/512 appearance inputs are allowed')
+    if options.appearance_size == 512 and meta['streams'][0]['width'] < 512:
+        raise ValueError('The high-resolution arm requires at least 512 genuine input pixels')
     targets = validate_frames(options.frames, count)
     sources = source_indices(options.source_frames, count)
     selected = sorted(set(targets + sources))
@@ -78,6 +82,8 @@ def run(options):
               'weights': {str(p.relative_to(root)): sha256(p) for p in paths},
               'gpu': os.environ['CUDA_VISIBLE_DEVICES'], 'motion_precision': 'FP32 fixed',
               'render_precision': ['fp16', 'fp32'], 'tf32': False,
+              'motion_input_size': 256, 'appearance_input_size': options.appearance_size,
+              'expected_output_size': options.appearance_size * 2,
               'cudnn_benchmark': torch.backends.cudnn.benchmark, 'roi_256': [64, 120, 192, 240],
               'resize': 'cv2 INTER_LINEAR to 256 for all inputs; INTER_AREA output to 256 for metrics',
               'metrics': [], 'note': 'Changing source changes appearance AND source canonical geometry; not a pure texture ablation.'}
@@ -88,7 +94,7 @@ def run(options):
         Image.fromarray(image).save(output / (name + '.png'))
 
     try:
-        images = {}
+        images, images512 = {}, {}
         cap = cv2.VideoCapture(str(video))
         try:
             if not cap.isOpened():
@@ -101,6 +107,8 @@ def run(options):
                     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                     images[i] = cv2.resize(rgb, (256, 256), interpolation=cv2.INTER_LINEAR)
                     save(f'{i:06d}-gt256', images[i])
+                    images512[i] = cv2.resize(rgb, (512, 512), interpolation=cv2.INTER_LINEAR)
+                    save(f'{i:06d}-gt512', images512[i])
         finally:
             cap.release()
         wrapper = LivePortraitWrapper(cfg)
@@ -115,7 +123,9 @@ def run(options):
             for half in (True, False):
                 precision = 'fp16' if half else 'fp32'
                 wrapper.inference_cfg.flag_use_half_precision = half
-                feature = wrapper.extract_feature_3d(prepared[s])
+                wrapper.inference_cfg.input_shape = (options.appearance_size, options.appearance_size)
+                appearance = images[s] if options.appearance_size == 256 else images512[s]
+                feature = wrapper.extract_feature_3d(wrapper.prepare_source(appearance))
                 self_rgb = wrapper.parse_output(wrapper.warp_decode(feature, ks, ks)['out'])[0]
                 save(f's{s}-{precision}-self', self_rgb)
                 for i in targets:
@@ -123,6 +133,8 @@ def run(options):
                     if not torch.isfinite(prediction).all():
                         raise RuntimeError('Non-finite prediction')
                     rgb = wrapper.parse_output(prediction)[0]
+                    if rgb.shape != (options.appearance_size * 2, options.appearance_size * 2, 3):
+                        raise RuntimeError('Unexpected renderer output size')
                     save(f's{s}-{precision}-f{i:06d}', rgb)
                     reduced = cv2.resize(rgb, (256, 256), interpolation=cv2.INTER_AREA)
                     diff = reduced.astype(np.float32) - images[i].astype(np.float32)
@@ -151,5 +163,7 @@ if __name__ == '__main__':
     parser.add_argument('--video', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--source-frames', type=int, nargs=2, required=True)
+    parser.add_argument('--appearance-size', type=int, choices=(256, 512), default=256,
+                        help='512 is an out-of-training-resolution diagnostic, not a recommended setting')
     parser.add_argument('--frames', type=int, nargs='+', required=True)
     print(json.dumps(run(parser.parse_args()), indent=2))
