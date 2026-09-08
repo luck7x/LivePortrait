@@ -39,7 +39,6 @@ class InferenceConfig(PrintableConfig):
     flag_crop_driving_video: bool = False
     device_id: int = 0
     flag_normalize_lip: bool = True
-    lip_width_correction: float = 0.0 # opt-in; 0 preserves the original inference path
     flag_source_video_eye_retargeting: bool = False
     flag_eye_retargeting: bool = False
     flag_lip_retargeting: bool = False
