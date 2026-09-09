@@ -32,6 +32,7 @@ class ArgumentConfig(PrintableConfig):
     flag_do_crop: bool = True  # whether to crop the source portrait or video to the face-cropping space
     driving_option: Literal["expression-friendly", "pose-friendly"] = "expression-friendly" # "expression-friendly" or "pose-friendly"; "expression-friendly" would adapt the driving motion with the global multiplier, and could be used when the source is a human image
     driving_multiplier: float = 1.0 # be used only when driving_option is "expression-friendly"
+    lip_vertical_gain: float = 1.0 # experimental lip-y expression increment gain, finite [1, 1.25]; image+video+relative only
     driving_smooth_observation_variance: float = 3e-7  # smooth strength scalar for the animated video when the input is a source video, the larger the number, the smoother the animated video; too much smoothness would result in loss of motion accuracy
     audio_priority: Literal['source', 'driving'] = 'driving'  # whether to use the audio from source or driving video
     animation_region: Literal["exp", "pose", "lip", "eyes", "all"] = "all" # the region where the animation was performed, "exp" means the expression, "pose" means the head pose, "all" means all regions

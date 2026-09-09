@@ -23,6 +23,7 @@ from .utils.crop import prepare_paste_back, paste_back
 from .utils.io import load_image_rgb, load_video, resize_to_limit, dump, load
 from .utils.helper import mkdir, basename, dct2device, is_video, is_template, remove_suffix, is_image, is_square_video, calc_motion_multiplier
 from .utils.filter import smooth
+from .utils.lip_vertical import apply_lip_vertical_gain, validate_lip_vertical_mode
 from .utils.rprint import rlog as log
 # from .utils.viz import viz_lmk
 from .live_portrait_wrapper import LivePortraitWrapper
@@ -79,6 +80,17 @@ class LivePortraitPipeline(object):
         inf_cfg = self.live_portrait_wrapper.inference_cfg
         device = self.live_portrait_wrapper.device
         crop_cfg = self.cropper.crop_cfg
+
+        validate_lip_vertical_mode(
+            inf_cfg.lip_vertical_gain,
+            source_is_image=is_image(args.source),
+            driving_is_video=is_video(args.driving) and not is_template(args.driving),
+            relative_motion=inf_cfg.flag_relative_motion,
+            eye_retargeting=inf_cfg.flag_eye_retargeting,
+            lip_retargeting=inf_cfg.flag_lip_retargeting,
+            source_video_eye_retargeting=inf_cfg.flag_source_video_eye_retargeting,
+            animation_region=inf_cfg.animation_region,
+        )
 
         ######## load source input ########
         flag_is_source_video = False
@@ -382,6 +394,10 @@ class LivePortraitPipeline(object):
                     t_new = x_d_i_info['t']
                 else:
                     t_new = x_s_info['t']
+
+            # Diagnostic only: preserve the original arithmetic path at gain=1.
+            if inf_cfg.lip_vertical_gain != 1.0:
+                delta_new = apply_lip_vertical_gain(delta_new, x_s_info['exp'], inf_cfg.lip_vertical_gain)
 
             t_new[..., 2].fill_(0)  # zero tz
             x_d_i_new = scale_new * (x_c_s @ R_new + delta_new) + t_new
