@@ -11,6 +11,8 @@ import numpy as np
 
 from .dataset import load_train_val, sha256
 from .protection import compose_allowed_region
+from .objectives import (prepare_residual, color_matched_target, gradient_error,
+                         mean_color_shift)
 
 MAX_WORKSPACE_BYTES = 20 * 1024**3
 SEED = 20260909
@@ -83,13 +85,15 @@ def _model(torch, variant):
     raise ValueError("variant must be B or C")
 
 
-def _evaluate(torch, model, dataset, check_budget):
+def _evaluate(torch, model, dataset, check_budget, objective="pixel"):
     arrays = dataset["arrays"]
     tensors = _tensors(torch, arrays)
     model.eval()
     check_budget()
     with torch.no_grad():
-        residual = model(tensors["base"], tensors["reference"], tensors["allowed"])
+        residual = prepare_residual(
+            torch, model(tensors["base"], tensors["reference"], tensors["allowed"]),
+            tensors["allowed"], tensors["alpha"], objective)
         prediction = compose_tensor(torch, tensors["base"], residual, tensors["allowed"], tensors["alpha"])
         if not torch.isfinite(residual).all() or not torch.isfinite(prediction).all():
             raise RuntimeError('nonfinite evaluation output')
@@ -116,7 +120,17 @@ def _evaluate(torch, model, dataset, check_budget):
     denominator = float(weight.sum() * 3 * 255)
     def error(rgb):
         return float((np.abs(rgb.astype(np.float64) - target) * weight).sum() / denominator)
-    return outputs, {"dataset_id": dataset["dataset_id"], "hashes": dataset["hashes"],
+    # Metrics use the actual quantized/composited output and unchanged GT.
+    with torch.no_grad():
+        final = torch.from_numpy(outputs).to(device=tensors["base"].device, dtype=torch.float32)
+        final = final.permute(0, 3, 1, 2)[None] / 255
+        extra = {}
+        for name, rgb in (("a", tensors["base"]), ("after", final)):
+            extra[f"{name}_raw_gt_gradient_error"] = float(gradient_error(
+                torch, rgb, tensors["target"], tensors["allowed"], tensors["alpha"]).cpu())
+            extra[f"{name}_mean_rgb_shift_from_a"] = float(mean_color_shift(
+                torch, rgb, tensors["base"], tensors["allowed"], tensors["alpha"]).cpu())
+    return outputs, {"dataset_id": dataset["dataset_id"], "hashes": dataset["hashes"], **extra,
                      "a_weighted_l1": error(arrays["base_rgb"]), "after_weighted_l1": error(outputs),
                      "changed_pixel_count": sum(frame["changed_pixel_count"] for frame in per_frame),
                      "outside_max_diff": max(frame["outside_max_diff"] for frame in per_frame),
@@ -138,7 +152,9 @@ def _synthetic_arrays():
 
 
 def run(*, workspace, output, train_record=None, val_record=None, variant="B",
-        steps=100, seconds=1800, authorized=False, synthetic_smoke=False):
+        steps=100, seconds=1800, authorized=False, synthetic_smoke=False, objective="pixel"):
+    if objective not in ("pixel", "structure"):
+        raise ValueError("objective must be pixel or structure")
     if synthetic_smoke:
         if train_record is not None or val_record is not None:
             raise ValueError("synthetic smoke cannot access real data records")
@@ -157,6 +173,12 @@ def run(*, workspace, output, train_record=None, val_record=None, variant="B",
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     repository = Path(__file__).resolve().parents[1]
     initial_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repository, text=True).strip()
+    code_paths = [Path(__file__), Path(__file__).with_name("dataset.py"),
+                  Path(__file__).with_name(f"model_{variant.lower()}.py"),
+                  Path(__file__).with_name("data_contract.py"), Path(__file__).with_name("protection.py"),
+                  Path(__file__).with_name("objectives.py"),
+                  repository / "scripts" / "train_teeth.py"]
+    initial_hashes = {str(p.relative_to(repository)): sha256(p) for p in code_paths}
     # No Torch import, CUDA initialization or model construction before admission.
     import torch
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
@@ -189,9 +211,20 @@ def run(*, workspace, output, train_record=None, val_record=None, variant="B",
         check_budget()
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        residual = model(tensors["base"], tensors["reference"], tensors["allowed"])
+        residual = prepare_residual(
+            torch, model(tensors["base"], tensors["reference"], tensors["allowed"]),
+            tensors["allowed"], tensors["alpha"], objective)
         prediction = compose_tensor(torch, tensors["base"], residual, tensors["allowed"], tensors["alpha"])
-        loss = weighted_loss(torch, prediction, tensors["target"], residual, tensors["allowed"], tensors["alpha"])
+        target = tensors["target"]
+        if objective == "structure":
+            target = color_matched_target(torch, target, tensors["base"],
+                                          tensors["allowed"], tensors["alpha"])
+        loss = weighted_loss(torch, prediction, target, residual, tensors["allowed"], tensors["alpha"])
+        if objective == "structure":
+            loss = loss + gradient_error(torch, prediction, tensors["target"],
+                                         tensors["allowed"], tensors["alpha"])
+            loss = loss + 0.5 * mean_color_shift(torch, prediction, tensors["base"],
+                                                tensors["allowed"], tensors["alpha"])
         if not torch.isfinite(loss):
             raise RuntimeError("nonfinite loss")
         loss.backward()
@@ -204,10 +237,10 @@ def run(*, workspace, output, train_record=None, val_record=None, variant="B",
         check_budget()
     if nonzero_gradient_steps == 0:
         raise RuntimeError('no nonzero gradients; not a successful training check')
-    del tensors, prediction, residual, loss
-    train_rgb, train_metrics = _evaluate(torch, model, train, check_budget)
+    del tensors, prediction, residual, loss, target
+    train_rgb, train_metrics = _evaluate(torch, model, train, check_budget, objective)
     metrics = {"status": "not_real_training" if synthetic_smoke else "training_run_completed_not_visual_approval",
-               "variant": variant, "seed": SEED, "lr": 1e-4, "steps": steps,
+               "variant": variant, "objective": objective, "seed": SEED, "lr": 1e-4, "steps": steps,
                "losses": losses, "nonzero_gradient_steps": nonzero_gradient_steps,
                "train": train_metrics,
                "split_claim": "dataset_id only; not identity-level",
@@ -216,7 +249,7 @@ def run(*, workspace, output, train_record=None, val_record=None, variant="B",
                "gpu": torch.cuda.get_device_name(0)}
     predictions = {"train_rgb": train_rgb, "train_frame_ids": train["arrays"]["frame_ids"]}
     if val is not None:
-        val_rgb, metrics["val"] = _evaluate(torch, model, val, check_budget)
+        val_rgb, metrics["val"] = _evaluate(torch, model, val, check_budget, objective)
         predictions.update(val_rgb=val_rgb, val_frame_ids=val["arrays"]["frame_ids"])
     repository = Path(__file__).resolve().parents[1]
     metrics["code_sha"] = subprocess.check_output(
@@ -225,16 +258,15 @@ def run(*, workspace, output, train_record=None, val_record=None, variant="B",
         ["git", "status", "--porcelain"], cwd=repository, text=True).strip())
     if metrics['git_dirty'] or metrics['code_sha'] != initial_sha:
         raise RuntimeError('code changed during the job')
-    code_paths = [Path(__file__), Path(__file__).with_name("dataset.py"),
-                  Path(__file__).with_name(f"model_{variant.lower()}.py"),
-                  Path(__file__).with_name("data_contract.py"), Path(__file__).with_name("protection.py"),
-                  repository / "scripts" / "train_teeth.py"]
     metrics["code_hashes"] = {str(p.relative_to(repository)): sha256(p) for p in code_paths}
+    if metrics["code_hashes"] != initial_hashes:
+        raise RuntimeError('code hashes changed during the job')
     check_budget(force_disk=True)
     destination.mkdir(exist_ok=False)
     # Smoke writes only its report: never a checkpoint or real-data predictions.
     if not synthetic_smoke:
-        torch.save({"variant": variant, "state_dict": model.state_dict(), "steps": steps,
+        torch.save({"variant": variant, "objective": objective,
+                    "state_dict": model.state_dict(), "steps": steps,
                     "seed": SEED, "code_sha": metrics["code_sha"],
                     "code_hashes": metrics["code_hashes"],
                     "data_hashes": {"train": train["hashes"], "val": val["hashes"]}},

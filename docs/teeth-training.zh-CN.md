@@ -1,4 +1,4 @@
-# B 局部训练基础（尚未运行真实训练）
+# B 局部训练基础与 r002 structure 目标（新目标尚未运行）
 
 本实现只增加独立局部残差网络，不修改 `src/`、`inference.py` 或 v1 权重。代码存在、CPU 契约通过、GPU 合成 smoke 通过、真实训练完成、视觉改善是五个不同状态，不能相互替代。当前仅允许本地 AST 和 NumPy/schema 检查；GPU 前反向及真实训练需在已获准 Linux 服务器另行执行。
 
@@ -45,10 +45,26 @@ train/val 必须分别提供准入记录，`dataset_id` 不同且 paired NPZ 哈
 - `--variant C` 才懒导入 `model_c.TemporalResidualC`。当前 B 分支不提供 C 实现；选 C 会明确失败，不自动回退到 B。CPU 导入 dataset/training/CLI 不导入 Torch，模型模块仅在准入和运行环境检查后加载。
 - 每步整个训练序列、batch=1；固定 seed `20260909`，Adam lr `1e-4`。验证序列不参与训练，不挑选最佳权重，不做身份级泛化声明。
 - 可微合成：候选为 `clamp(base+residual,0,1)`，active=`allowed & (alpha>0)`，`where(active, base*(1-alpha)+candidate*alpha, base)`。非 active 像素严格保留 base；alpha 和 mask 不学习。
-- 损失仅为允许区 alpha 加权 L1，加 `1e-4` 的 alpha 加权残差平方正则。无全图训练损失，无原 v1 模型参数更新。
+- 默认 `--objective pixel` 保留原残差、原始 GT 的允许区 alpha 加权 L1 与 `1e-4` 残差平方正则，保留旧训练数学路径。`--objective structure` 见下文；无全图训练损失，无原 v1 模型参数更新。
 - 最终候选先量化为 uint8，再调用现有 `compose_allowed_region` 用原 alpha 合成，逐帧验收 outside 最大差为 0，额外检查 alpha=0 不变。这与浮点训练存在明确的量化误差，不用二次 alpha 合成，也不宣称与浮点输出逐位一致。
 
 真实训练成功才写一个 `checkpoint.pt`、一个 `predictions.npz` 和 `metrics.json`。NPZ 包含 `train_rgb/val_rgb` 及各自 `train_frame_ids/val_frame_ids`，保存两段全部准入帧的 uint8 输出，不拼成原始整片、不附原音轨、不生成 MP4。指标记录原始 A / 训练后 `[0,1]` 尺度 alpha 加权 L1、逐帧及总变化像素、outside0、SHA/实际代码文件哈希/dirty 状态、数据哈希、步数、耗时、峰值 GPU 分配字节。低像素误差不是牙齿视觉改善证据。
+
+## r002：抑制增白捷径的 structure 目标
+
+首轮 200 步真实训练盲审主要看到中央增白亮带，而非可靠牙缝恢复；低 L1 不代表成功。此次只新增可选训练目标，不改模型容量、mask、alpha、GT 文件或 A/v1 主体，不增加时序损失。用户允许沿用同一 mask 继续训练，不等于此目标已经验证有效。
+
+选择 `--objective structure` 后：
+
+1. **训练、评测和未来推理共用** `objectives.prepare_residual`：按每帧、每 RGB 通道计算 allowed 内 alpha 加权残差均值并减去；非 active 区归零。若最大绝对值超过 1，用该帧该通道单一比例缩放，不能逐像素裁剪残差。空 mask 返回零。此步骤不接收 GT。
+2. 仅在损失内将 GT 按同一权重的 RGB 均值平移到 A 的原色均值，再 clip 到 `[0,1]`；不改写原始 GT。裁剪后均值不保证仍严格匹配。
+3. 损失为调色 GT 的既有 alpha 加权 L1 + **未调色原始 GT** 的梯度匹配 + `0.5 × 最终浮点合成输出相对 A 的局部平均 RGB 色偏` + `1e-4` 后处理残差平方正则。梯度为水平/垂直有符号一阶差分的 L1，只有相邻两点均 active 才监督，边权取两点 alpha 的较小值，按有效边权×3 归一化；固定区边界不当牙缝，空邻域返回可微零。色偏先对每帧每通道按 alpha 求有符号均值，再取绝对值，对非空帧和 RGB 通道等权平均（不让不同帧正负抵消）。
+
+残差零均值不保证最终输出零色偏，因为候选 RGB 截断、alpha 合成和 uint8 量化仍可造成偏移，故另加最终输出色偏项。梯度目标也不保证能恢复不可辨认牙缝，须用同输入完整窗口盲审验证，不能只报训练 loss。
+
+评价保持 `a_weighted_l1/after_weighted_l1` 对**原始 GT** 的 RGB L1；新增 `a_raw_gt_gradient_error/after_raw_gt_gradient_error` 对同一 raw GT 的梯度误差，以及 `a_mean_rgb_shift_from_a/after_mean_rgb_shift_from_a` 局部平均色偏（A 自身为 0）。这些指标均基于最终量化、原 alpha 合成的交付帧；不拿 pixel 与 structure 的训练 loss 数值直接比较。
+
+checkpoint 和 metrics 均记录 `objective`，`code_hashes` 包含 `teeth_local/objectives.py`，运行前后逐文件哈希一致性检查保留。**未来加载 checkpoint 推理必须先调用 `verify_objective_metadata(checkpoint, repository)` 校验 objective 和代码哈希，再将 model.forward 的原残差交给 `prepare_residual(torch, residual, allowed, alpha, objective)`，之后才做候选 clamp 和原保护合成；禁止仅裸 model.forward 相加。** 当前不新增独立 checkpoint 推理 CLI。缺 objective/objectives.py 哈希的历史 checkpoint 不可静默当成 structure；此校验器明确拒绝，需要走经确认的历史 pixel 代码路径。
 
 ## 运行门槛（下列为未来获准远程执行示例，不是本地运行建议）
 
@@ -79,4 +95,6 @@ python -B -m unittest discover -s tests -p test_teeth_protection.py
 python -B -m unittest discover -s tests -p test_teeth_training_contract.py
 ```
 
-新测试只做 schema、NPZ、NumPy 算术与禁止 Torch 导入的隔离进程检查。模型文件仅 AST 解析，不能以这些检查宣称已完成 CUDA smoke 或训练。服务器不可用也不得改用本地模型运行。
+本地只做 AST、schema、NPZ、NumPy 算术与禁止 Torch 导入的隔离进程检查。新增 `tests/test_teeth_objectives.py` 数学测试仅当 Linux 且显式设置 `TEETH_TENSOR_TESTS=1` 时在 Torch CPU 执行；Windows 无条件跳过且不导入 Torch。测试覆盖加权零均值/统一缩放、空 mask、亮度常量偏移的梯度不变性、可微梯度、固定边界/孤立像素忽略及 GT 不变。
+
+获准服务器现有环境可执行 `TEETH_TENSOR_TESTS=1 python -B -m unittest discover -s tests -p test_teeth_objectives.py`；这不是本地执行许可。新目标正式运行须显式添加 `--objective structure`，未指定仍为 pixel。不能以 AST/NumPy 检查宣称已完成这些数学测试、CUDA smoke 或真实训练。服务器不可用也不得改用本地模型运行。
