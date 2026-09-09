@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--train-record")
     parser.add_argument("--val-record")
     parser.add_argument("--variant", choices=("B", "C"), default="B")
+    parser.add_argument("--objective", choices=("pixel", "structure"), default="pixel")
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--seconds", type=float, default=1800)
     parser.add_argument("--synthetic-smoke", action="store_true",
