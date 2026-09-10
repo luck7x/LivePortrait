@@ -93,11 +93,13 @@ def main():
     if subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain'], text=True, timeout=10).strip():
         raise RuntimeError('require a clean pinned code worktree')
     initial_hashes = {p: hashlib.sha256((repo / p).read_bytes()).hexdigest() for p in files}
-    initial_bytes = sum(p.stat().st_size for p in root.rglob('*') if p.is_file() and not p.is_symlink())
+    # Match the project's allocated-space budget; summing logical file sizes
+    # double-counts environment/cache hardlinks and falsely exhausts the quota.
+    initial_bytes = int(subprocess.check_output(['du', '-s', '-B1', str(root)], text=True, timeout=20).split()[0])
     def budget(reserve=0):
         if time.monotonic() >= deadline:
             raise RuntimeError('300 second deadline exceeded')
-        added = sum(p.stat().st_size for p in output.rglob('*') if p.is_file()) if output.exists() else 0
+        added = sum(p.stat().st_blocks * 512 for p in output.rglob('*') if p.is_file()) if output.exists() else 0
         if initial_bytes + added + reserve > LIMIT or shutil.disk_usage(root).free < reserve + 64 * 1024**2:
             raise RuntimeError('20 GiB workspace / remaining disk headroom limit')
     budget()
