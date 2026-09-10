@@ -194,6 +194,7 @@ def run(args):
         from src.config.inference_config import InferenceConfig
         from src.config.crop_config import CropConfig
         import src.live_portrait_pipeline as pipeline_module
+        from src.utils.io import load_video
 
         random.seed(20260910)
         np.random.seed(20260910)
@@ -230,25 +231,24 @@ def run(args):
             'Nine-frame rawsubset has f0 -> f260 time jump. Internal only. No full video optimization.\n')
 
         def decode_selected(path):
-            cap = cv2.VideoCapture(str(path))
+            cap = cv2.VideoCapture(str(path))  # Metadata only, not RGB decoding.
             try:
                 if abs(cap.get(cv2.CAP_PROP_FPS) - 25) > .01:
                     raise ValueError('Expected 25fps original driver')
-                frames = []
-                for number in FRAMES:
-                    if not cap.set(cv2.CAP_PROP_POS_FRAMES, number):
-                        raise RuntimeError('Decoder seek failed')
-                    ok, bgr = cap.read()
-                    if not ok or bgr.shape != (1024, 1024, 3):
-                        raise ValueError('Expected original 1024 RGB driver frames')
-                    if abs(cap.get(cv2.CAP_PROP_POS_FRAMES) - (number + 1)) > .1:
-                        raise RuntimeError('Decoder frame-position mismatch')
-                    frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-                return frames
             finally:
                 cap.release()
+            # Reuse the production ImageIO/FFmpeg RGB path; OpenCV seeking can
+            # change chroma upsampling and is not a pixel-identical baseline.
+            prefix = load_video(str(path), n_frames=FRAMES[-1] + 1)
+            if len(prefix) != FRAMES[-1] + 1:
+                raise RuntimeError('Original sequential decoder ended too early')
+            frames = [prefix[number].copy() for number in FRAMES]
+            if any(f.dtype != np.uint8 or f.shape != (1024, 1024, 3) for f in frames):
+                raise ValueError('Expected original 1024 RGB driver frames')
+            return frames
 
         frames = decode_selected(driving)
+        report['rgb_decoder'] = 'original src.utils.io.load_video ImageIO/FFmpeg; sequential prefix'
         report['decoded_rgb_hashes'] = dict(zip(map(str, FRAMES), map(array_hash, frames)))
         raw = internal / 'rawsubset_ANCHOR_TIME_JUMP.avi'
         guard.check(40 * 2**20)
@@ -256,16 +256,10 @@ def run(args):
             '-pix_fmt', 'rgb24', '-s', '1024x1024', '-r', '25', '-i', 'pipe:0',
             '-an', '-c:v', 'ffv1', '-threads', '2', '-filter_threads', '2', '-pix_fmt', 'bgr0', str(raw)],
             input=b''.join(f.tobytes() for f in frames), capture_output=True)
-        cap = cv2.VideoCapture(str(raw))
-        try:
-            for expected in frames:
-                ok, bgr = cap.read()
-                if not ok or not np.array_equal(expected, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)):
-                    raise RuntimeError('FFV1 re-decode changed RGB')
-            if cap.read()[0]:
-                raise RuntimeError('Unexpected extra rawsubset frame')
-        finally:
-            cap.release()
+        roundtrip = load_video(str(raw))
+        if len(roundtrip) != len(frames) or any(not np.array_equal(a, b) for a, b in zip(frames, roundtrip)):
+            raise RuntimeError('Production FFV1 re-decode changed RGB or frame count')
+        del roundtrip
         report['rawsubset_rgb_exact'] = True
         del frames
         pipeline = pipeline_module.LivePortraitPipeline(cfg, crop_cfg)

@@ -174,6 +174,12 @@ class StaticTests(unittest.TestCase):
         self.assertNotIn('x_d_i_new =', self.text)
         self.assertNotIn('get_rotation_matrix', self.text)
 
+    def test_production_decoder_used_for_rgb(self):
+        self.assertIn('from src.utils.io import load_video', self.text)
+        self.assertIn('prefix = load_video(str(path), n_frames=FRAMES[-1] + 1)', self.text)
+        self.assertIn('roundtrip = load_video(str(raw))', self.text)
+        self.assertNotIn('CAP_PROP_POS_FRAMES', self.text)
+
     def test_blur_targets_real_input_not_source(self):
         self.assertIn('perturbed = tensor.clone()', self.text)
         self.assertIn('for i in range(1, 9):', self.text)
@@ -187,7 +193,7 @@ class StaticTests(unittest.TestCase):
         self.assertIn("'-start_number', '260'", self.text)
         self.assertIn("'-frames:v', '8'", self.text)
         self.assertIn("'-pix_fmt', 'bgr0'", self.text)
-        self.assertIn('np.array_equal(expected, cv2.cvtColor', self.text)
+        self.assertIn('any(not np.array_equal(a, b) for a, b in zip(frames, roundtrip))', self.text)
         self.assertIn('if count != 8:', self.text)
 
 
