@@ -15,14 +15,15 @@ probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 
 
-def template():
+def template(frame_ids=None):
+    frames = probe.FRAMES if frame_ids is None else frame_ids
     rng = np.random.default_rng(17)
     motions = []
-    for _ in probe.FRAMES:
+    for _ in frames:
         motions.append({k: rng.normal(size=shape).astype(np.float32) for k, shape in
                         {'exp': (1, 21, 3), 'kp': (1, 21, 3), 'x_s': (1, 21, 3),
                          'R': (1, 3, 3), 't': (1, 1, 3), 'scale': (1, 1)}.items()})
-    return {'n_frames': 9, 'output_fps': 25, 'motion': motions,
+    return {'n_frames': len(frames), 'output_fps': 25, 'motion': motions,
             'c_eyes_lst': [np.ones((1, 2), np.float32) for _ in motions],
             'c_lip_lst': [np.zeros((1, 1), np.float32) for _ in motions]}
 
@@ -31,6 +32,33 @@ class ArithmeticTests(unittest.TestCase):
     def test_fixed_scope(self):
         self.assertEqual(probe.FRAMES, (0, 260, 261, 262, 263, 264, 265, 266, 267))
         self.assertEqual(len(probe.CASES) * (len(probe.FRAMES) - 1), 32)
+
+    def test_extended_window_bounds(self):
+        self.assertEqual(probe.frame_window(), probe.FRAMES)
+        frames = probe.frame_window(200, 300)
+        self.assertEqual(len(frames), 102)
+        self.assertEqual(frames[1:], tuple(range(200, 301)))
+        self.assertEqual(frames[frames.index(264)], 264)
+        for start, end in [(0, 100), (199, 300), (264, 300), (260, 263), (260, 600), (True, 267)]:
+            with self.assertRaises(ValueError):
+                probe.frame_window(start, end)
+
+    def test_extended_intervention_invariants(self):
+        frames = probe.frame_window(200, 300)
+        original = template(frames)
+        saved = copy.deepcopy(original)
+        for case in ('freeze_lip', 'freeze_pose'):
+            result, invariants = probe.intervene(original, case, frame_ids=frames)
+            self.assertTrue(probe.equal(original, saved))
+            self.assertTrue(probe.equal(result['motion'][0], original['motion'][0]))
+            for item in result['motion'][1:]:
+                reference = original['motion'][frames.index(264)]
+                if case == 'freeze_lip':
+                    np.testing.assert_array_equal(item['exp'][:, probe.LIPS, :], reference['exp'][:, probe.LIPS, :])
+                else:
+                    for key in ('R', 't', 'scale'):
+                        np.testing.assert_array_equal(item[key], reference[key])
+            self.assertTrue(invariants['all_non_target_fields_unchanged'])
 
     def test_lip_only_and_no_mutation(self):
         original = template()
@@ -182,7 +210,7 @@ class StaticTests(unittest.TestCase):
 
     def test_blur_targets_real_input_not_source(self):
         self.assertIn('perturbed = tensor.clone()', self.text)
-        self.assertIn('for i in range(1, 9):', self.text)
+        self.assertIn('for i in range(1, len(FRAMES)):', self.text)
         self.assertIn('cv2.GaussianBlur(small, (5, 5), 0)', self.text)
         self.assertIn('torch.equal(tensor[0], perturbed[0])', self.text)
         self.assertIn("digest != state['source_hash']", self.text)
@@ -190,11 +218,11 @@ class StaticTests(unittest.TestCase):
     def test_hard_timeout_and_output_frame_boundary(self):
         self.assertIn('process.join(299)', self.text)
         self.assertIn('os.killpg(process.pid, signal.SIGKILL)', self.text)
-        self.assertIn("'-start_number', '260'", self.text)
-        self.assertIn("'-frames:v', '8'", self.text)
+        self.assertIn("'-start_number', str(FRAMES[1])", self.text)
+        self.assertIn("'-frames:v', str(len(FRAMES)-1)", self.text)
         self.assertIn("'-pix_fmt', 'bgr0'", self.text)
         self.assertIn('any(not np.array_equal(a, b) for a, b in zip(frames, roundtrip))', self.text)
-        self.assertIn('if count != 8:', self.text)
+        self.assertIn('if count != len(FRAMES)-1:', self.text)
 
 
 if __name__ == '__main__':

@@ -1,17 +1,17 @@
 # 牙齿模型本体因果诊断探针
 
-## 性质与固定范围
+## 性质与有界范围
 
 `scripts/probe_teeth_causality.py` 是**模型本体扰动诊断脚本**，不是优化器、像素后处理、训练或已验证修复。它不修改 `src/`，不覆盖 v1 权重或原始媒体，不将旧 trace 或外部 pickle 喂给 pipeline。
 
-固定用户原驱动的 **f0 + f260–267**，25fps，共 9 个内部输入；用户可查看的输出仅为 **f260–267 连续 8 帧（10.40–10.68 秒，视频时长 0.32 秒）**。四种 case 共 32 个目标模型输出，不是完整 581 帧／23.24 秒视频优化。
+默认选择用户原驱动的 **f0 + f260–267**，25fps，共9个内部输入，交付8个连续目标帧。支持 `--start 200 --end 300` 扩展为 **f200–300连续101帧，25fps、4.04秒**；四case共404个真实目标模型输出。不是把8帧循环或慢放成4秒，也不是完整581帧优化。窗口必须包含f263重复检查及f264冻结参考，最多101个连续目标帧，另保留独立f0初始化；300秒、512MiB和项目20GiB上限不变。下面九帧/八帧示例描述默认短窗口，数量和文件名随实际窗口变化。
 
 | case | 唯一预定扰动 |
 |---|---|
 | baseline | 原始 M 输入与运动模板 |
 | freeze_lip | 除 f0 外，仅把 `exp[:, [6,12,14,17,19,20], :]` 固定为本次 baseline f264 的值 |
 | freeze_pose | 除 f0 外，仅把 `R / t / scale` 固定为本次 baseline f264 的值；exp 原样 |
-| blur_driver | 仅在原 `make_motion_template` 接到的真实 `I_d` 上，对 f260–267 做 256→128（AREA）、5×5 Gaussian（sigma=0）、128→256（LINEAR）；f0 与源照片不变 |
+| blur_driver | 仅在原 `make_motion_template` 接到的真实 `I_d` 上，对所选目标帧做 256→128（AREA）、5×5 Gaussian（sigma=0）、128→256（LINEAR）；f0 与源照片不变 |
 
 冻结模板的 `kp/x_s` 等未干预字段保持原值，**不会为追求模板内部的几何自洽而额外改写它们**。最终关键点公式、relative motion、运动 multiplier、stitching、lip-normalize、W/G 均由原 `LivePortraitPipeline.execute` 执行，不在脚本中重抄或替换。
 
@@ -28,7 +28,7 @@
 
 ## 输入与产物
 
-通过原项目src.utils.io.load_video（ImageIO/FFmpeg）顺序读取原视频到f267，选择f0与f260–267九帧进入模型；此前各帧只参与解码不参与本探针推理。检查25fps和原始1024 RGB尺寸。不能改用OpenCV seek读取RGB后就宣称是同一生产解码路径：其色度上采样可产生差异。原帧未经缩放，以FFmpeg FFV1/BGR0写入内部AVI，再由同一load_video读取，要求九帧RGB完全相等且无多余帧。此等值是视频解码RGB，不声称恢复压缩前相机数据。
+通过原项目src.utils.io.load_video（ImageIO/FFmpeg）顺序读取原视频到指定end帧，选择f0与连续start—end进入模型；此前各帧只参与解码不参与本探针推理。检查25fps和原始1024 RGB尺寸。不能改用OpenCV seek读取RGB后就宣称是同一生产解码路径：其色度上采样可产生差异。原帧未经缩放，以FFmpeg FFV1/BGR0写入内部AVI，再由同一load_video读取，要求全部所选帧RGB完全相等且无多余帧。此等值是视频解码RGB，不声称恢复压缩前相机数据。
 
 ```text
 output/
@@ -56,7 +56,7 @@ output/
 
 每 case 单独 inputs 路径，避免原 pipeline 的 `.pkl` 同名覆盖。数值 npz 不含 Python 对象；外部分析读取时使用 `allow_pickle=False`。运动各字段 baseline/干预后 hash、两种 freeze 的全部非目标字段不变断言、anchor 不变断言都记录；完整前后数值可由 baseline 和 case npz 对照。正常完成还验证四 case anchor 输出像素一致。
 
-诊断 MP4 使用 8 张真实连续 PNG 编码为 H.264/yuv420p，无音轨，并完整解码核对 8 帧；有损编码不保证逐像素等于 PNG。每 case 对 baseline 的全图 RGB MAE、口区 `[190,310,360,430]`（xyxy，右/下边界不含）MAE，及 7 对连续相邻帧的相同指标仅为**响应差异 proxy，不是牙齿质量分数**。不把冻结导致的少运动说成稳定修复，不依据 MAE 排名自然度。
+诊断MP4使用所选窗口的真实连续PNG编码为H.264/yuv420p，无音轨，并完整解码核对实际目标帧数（默认8，长窗口101）；有损编码不保证逐像素等于 PNG。每 case 对 baseline 的全图 RGB MAE、口区 `[190,310,360,430]`（xyxy，右/下边界不含）MAE，及窗口内连续相邻帧的相同指标（默认7对，长窗口100对）仅为**响应差异 proxy，不是牙齿质量分数**。不把冻结导致的少运动说成稳定修复，不依据 MAE 排名自然度。
 
 ## 执行门槛（本文不构成服务器授权）
 
@@ -88,6 +88,6 @@ python -B scripts/probe_teeth_causality.py --workspace <项目绝对路径> --so
 python -B -m unittest discover -s tests -p test_teeth_causality.py -v
 ```
 
-本次本地执行结果：**15 项测试全部通过**（真实运行；不含远程依赖）。测试只导入标准库与 NumPy：冻结 lip/pose 的字段边界、f264 索引、f0 与原缓存不变、proxy 算术/ROI、哈希、路径边界、平台/授权拒绝、mock du/headroom/Git pin，以及 AST/源码级 hook 和延迟 import 检查。
+最初本地15项测试通过，此后补充生产解码和长窗口检查；当前测试数量及结果以实际运行日志为准。测试只导入标准库与NumPy：冻结 lip/pose 的字段边界、f264 索引、f0 与原缓存不变、proxy 算术/ROI、哈希、路径边界、平台/授权拒绝、mock du/headroom/Git pin，以及 AST/源码级 hook 和延迟 import 检查。
 
 本地测试**不能证明**远程模型构造、确定性 CUDA、FFV1 RGB 往返、真实 M 输入模糊、四 case F/x_s 一致性、重复 warp 像素、MP4 完整解码、真实时空资源预算已经通过；这些检查已写入脚本，但必须在未来获准的固定代码服务器运行中取证。也未运行训练、模型推理、CV2、Torch、服务器或网络操作。因果响应即使可复现，也不独自证明牙齿异常的唯一根因或任何可采用优化。

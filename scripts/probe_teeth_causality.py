@@ -54,12 +54,23 @@ def equal(a, b):
     return bool(np.array_equal(a, b))
 
 
-def intervene(base, case):
+def frame_window(start=260, end=267):
+    """Keep f0 initialization separate from a real, bounded continuous window."""
+    if (isinstance(start, bool) or isinstance(end, bool)
+            or not isinstance(start, int) or not isinstance(end, int)
+            or not 1 <= start <= 263 < 264 <= end < 600
+            or end-start+1 > 101):
+        raise ValueError('Window must include f263/f264, exclude f0, and contain at most 101 frames')
+    return (0, *range(start, end+1))
+
+
+def intervene(base, case, frame_ids=None):
     """Copy only this run's template; verify every non-intervened field."""
-    if case not in ('freeze_lip', 'freeze_pose') or base['n_frames'] != len(FRAMES):
-        raise ValueError('Expected a nine-frame fresh template and a freeze case')
+    frame_ids = FRAMES if frame_ids is None else frame_ids
+    if case not in ('freeze_lip', 'freeze_pose') or base['n_frames'] != len(frame_ids):
+        raise ValueError('Expected the fresh bounded template and a freeze case')
     result = copy.deepcopy(base)
-    reference = base['motion'][FRAMES.index(264)]
+    reference = base['motion'][frame_ids.index(264)]
     for item in result['motion'][1:]:
         if case == 'freeze_lip':
             item['exp'][:, LIPS, :] = reference['exp'][:, LIPS, :]
@@ -136,6 +147,7 @@ def write_json(path, data):
 def run(args):
     if sys.platform != 'linux' or not args.authorize_probe:
         raise RuntimeError('Explicit --authorize-probe on authorized Linux required')
+    FRAMES = frame_window(args.start, args.end)
     root = args.workspace.resolve(strict=True)
     inside(REPO, root, True)
     source = inside(args.source, root, True)
@@ -167,7 +179,7 @@ def run(args):
               'worker_pid': os.getpid(), 'worker_process_group': os.getpgrp(),
               'cases': {}, 'warnings': ['MAE is a proxy, not a tooth quality score',
               'Frozen/reduced motion is not a stability repair',
-              'Internal nine-frame inputs include a time jump; never deliver them']}
+              'Internal inputs include a jump from f0 to the selected window; never deliver them']}
     report_path = output / 'probe.json'
     write_json(report_path, report)
     before = {}
@@ -228,7 +240,7 @@ def run(args):
         internal = output / 'internal'
         internal.mkdir()
         (internal / 'NOT_FOR_DELIVERY.txt').write_text(
-            'Nine-frame rawsubset has f0 -> f260 time jump. Internal only. No full video optimization.\n')
+            f'Rawsubset has f0 -> f{FRAMES[1]} time jump. Internal only. No full video optimization.\n')
 
         def decode_selected(path):
             cap = cv2.VideoCapture(str(path))  # Metadata only, not RGB decoding.
@@ -304,7 +316,7 @@ def run(args):
                 rendered = []
 
                 def template_hook(tensor, eyes, lips, **kwargs):
-                    if tuple(tensor.shape[-2:]) != (256, 256) or tensor.shape[0] != 9:
+                    if tuple(tensor.shape[-2:]) != (256, 256) or tensor.shape[0] != len(FRAMES):
                         raise RuntimeError('Unexpected actual driving M input')
                     case_report['M_input_before_hash'] = array_hash(cpu(tensor))
                     if case == 'baseline':
@@ -315,12 +327,12 @@ def run(args):
                         if array_hash(cpu(tensor)) != state['driver_input_hash']:
                             raise RuntimeError('Unperturbed driving input differs across cases')
                         if case in ('freeze_lip', 'freeze_pose'):
-                            template, invariants = intervene(state['base'], case)
+                            template, invariants = intervene(state['base'], case, frame_ids=FRAMES)
                             case_report['invariants'] = invariants
                         else:
                             # Blur only actual normalized M input. Neither source nor f0 changes.
                             perturbed = tensor.clone()
-                            for i in range(1, 9):
+                            for i in range(1, len(FRAMES)):
                                 image = cpu(tensor[i, 0]).transpose(1, 2, 0)
                                 small = cv2.resize(image, (128, 128), interpolation=cv2.INTER_AREA)
                                 small = cv2.GaussianBlur(small, (5, 5), 0)
@@ -353,7 +365,7 @@ def run(args):
 
                 def warp_hook(f_s, x_s, x_d):
                     index = len(rendered)
-                    if index >= 9:
+                    if index >= len(FRAMES):
                         raise RuntimeError('Unexpected extra warp call')
                     fixed = {'f_s': array_hash(cpu(f_s)), 'x_s': array_hash(cpu(x_s)),
                              'prepare_source': state['source_hash']}
@@ -396,18 +408,18 @@ def run(args):
                 case_report['arguments'] = dataclasses.asdict(arguments)
                 with torch.no_grad():
                     pipeline.execute(arguments)
-                if len(rendered) != 9:
-                    raise RuntimeError('Probe did not render exactly nine internal frames')
+                if len(rendered) != len(FRAMES):
+                    raise RuntimeError('Probe did not render the exact selected frame count')
                 if case != 'baseline' and not np.array_equal(rendered[0], outputs['baseline'][0]):
                     raise RuntimeError('Anchor rendered pixels differ')
-                for i in range(2, 9):
+                for i in range(2, len(FRAMES)):
                     case_report['adjacent_proxy'].append({'from': FRAMES[i - 1], 'to': FRAMES[i],
                                                         **proxy(rendered[i - 1], rendered[i])})
                 outputs[case] = rendered
                 guard.check(16 * 2**20)
-                diagnostic = folder / 'diagnostic_f260-f267_8frames_silent.mp4'
+                diagnostic = folder / f'diagnostic_f{FRAMES[1]}-f{FRAMES[-1]}_{len(FRAMES)-1}frames_silent.mp4'
                 guard.command(['ffmpeg', '-v', 'error', '-nostdin', '-n', '-framerate', '25',
-                    '-start_number', '260', '-i', str(folder / 'f%06d.png'), '-frames:v', '8',
+                    '-start_number', str(FRAMES[1]), '-i', str(folder / 'f%06d.png'), '-frames:v', str(len(FRAMES)-1),
                     '-an', '-c:v', 'libx264', '-threads', '2', '-filter_threads', '2', '-crf', '15', '-pix_fmt', 'yuv420p', str(diagnostic)],
                     capture_output=True)
                 cap = cv2.VideoCapture(str(diagnostic))
@@ -417,14 +429,14 @@ def run(args):
                         count += 1
                 finally:
                     cap.release()
-                if count != 8:
+                if count != len(FRAMES)-1:
                     raise RuntimeError('Diagnostic video decode count mismatch')
                 case_report.update(status='completed', video_decoded_frames=count)
                 write_json(report_path, report)
             for case in CASES[1:]:
                 report['cases'][case]['vs_baseline_proxy'] = [
                     {'frame': FRAMES[i], **proxy(outputs['baseline'][i], outputs[case][i])}
-                    for i in range(1, 9)]
+                    for i in range(1, len(FRAMES))]
         finally:
             pipeline_module.images2video = original_video
             pipeline.make_motion_template = original_template
@@ -507,7 +519,11 @@ def main():
     for name in ('workspace', 'source', 'driving', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--authorize-probe', action='store_true')
-    supervised(parser.parse_args())
+    parser.add_argument('--start', type=int, default=260)
+    parser.add_argument('--end', type=int, default=267)
+    args = parser.parse_args()
+    frame_window(args.start, args.end)  # Reject unsupported windows before forking.
+    supervised(args)
 
 
 if __name__ == '__main__':
