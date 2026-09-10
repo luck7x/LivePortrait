@@ -201,7 +201,7 @@ def main():
         budget(n * h * w * 4)
         subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-n', '-threads', '2', '-filter_threads', '2', *command],
                        check=True, timeout=max(0.1, deadline - time.monotonic()))
-    common = ['-an', '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p']
+    common = ['-an', '-c:v', 'libx264', '-crf', '16', '-threads', '2', '-pix_fmt', 'yuv420p']
     # Pad odd canvas edges for yuv420p, never synthesize frames.
     for name in ('before', 'after'):
         encode(['-framerate', str(fps), '-i', str(output / name / '%04d.png'), '-vf',
