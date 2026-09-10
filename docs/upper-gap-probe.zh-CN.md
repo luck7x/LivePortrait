@@ -27,14 +27,16 @@ python scripts/probe_upper_gap.py --workspace /authorized/project \
 1. 将全图缩小至最长边 640，以 ROI 上方眼眉/上脸区域提取角点（排除嘴部）。anchor→current LK 加反向误差过滤，RANSAC partial affine；至少 8 内点、比例至少 0.6，误差不超过 `1.5 × ROI宽/75` 原图像素，缩放限 0.75–1.25。旋转限20度、平移限100原画幅像素，特征限制在鼻眼和上脸附近，避免背景主导。任何失败回退原帧 A，清空 EMA。
 2. 当前 RGB 对齐 anchor；只取 ROI 左右 `5×scale`、上 `4×scale`、下 `18×scale` 上下文。上下文越出有效映射区域则回退。
 3. NumPy 根据低红度浅色像素找分开的亮带。上牙须接近 ROI 中心并在 ROI 内；下面必须存在第二亮带和至少约 `2×scale` 的明显暗隙。红色像素额外排除。单牙带、闭口或歧义不修。
-4. 仅上牙各行首尾 seed 之间，以约 `5×scale`、最大 15 的奇数水平 closing 新增区域为候选 fill。只有新增 fill 内混合邻近 seed 加权 RGB，默认强度 0.85；原 seed 牙面不整体刷白。EMA 为 `0.65 current + 0.35 previous`，再次乘当前 fill，旧帧 RGB 从不复制。
+4. 仅上牙各行首尾 seed 之间，以约 `5×scale`、最大 15 的奇数水平 closing 新增区域为候选 fill。剔除上下边缘缓冲、孤点、过宽或过矮的连通块，要求候选有纵向支持，避免横向悬空亮桥。只有新增 fill 内混合邻近 seed 加权 RGB，默认强度 0.85；原 seed 牙面不整体刷白。EMA 为 `0.65 current + 0.35 previous`，再次乘当前 fill，旧帧 RGB 从不复制。
 5. 仅将稀疏 delta/alpha 映回当前原始完整画幅；nearest hard allowed 再裁剪支持，并在原始当前画幅再次排除红色像素与已有浅色牙面像素。最终 uint8 原帧复制后只写允许区，不把重采样整图作为输出。检查允许区外最大像素差为 0。
+6. 对完整有界窗口做离线两帧渐入/渐出，孤立单帧修改直接取消；无效帧始终回退原图，不将旧牙拖进遮挡帧。此步骤用到了窗口内后续帧，不是实时处理，状态不能无说明地分块重启。
 
 **局限：**这是亮度/颜色及行结构启发式，不是可靠皮肤/牙齿语义分类；中性浅肤、反光或不恰当 ROI 仍可能误判。缺少可见下牙时有意回退。partial affine 不能解释所有三维运动，牙面原样保护首先成立于对齐 patch，亚像素映回及 hard mask 的语义准确性仍必须远程逐帧检查。增加亮度或填缝不等于更自然；不改变牙冠整体高度、不生成遮挡牙、不保证用户要求的整排平缓外观。当前候选范围未经人工批准，不用于训练或正式发布。
 
 ## 证据产物
 
 - `before/0000.png`、`after/0000.png`、`allowed/0000.png`：连续选段的每个真实解码完整画幅及当前候选许可。PNG 序号与原视频帧号映射见 metrics。
+- `unfaded/`保存渐入/渐出之前的真实算法结果，`after/`保存最终结果，逐帧记录transition_weight；不覆盖历史试验目录。
 - `before.mp4`、`after.mp4`、`compare.mp4`：相同完整选段、真实输入 fps（不可用或超出支持范围则拒绝，不虚构帧率）、无声；奇数尺寸只在右/下边补齐偶数编码尺寸，不补帧。输出均再次完整解码核对帧数。
 - `metrics.json`：输入 SHA256、Git HEAD codeSHA 与实际代码文件 SHA256（避免未提交代码被误记为 HEAD）、全部参数、逐帧原因/changed/allowed/outside0，`source-role=final-canvas`，`mask_approved=false`、`training_enabled=false`、`temporal_validated=false`。绝对本机路径可能在参数中，报告未经脱敏不得上传。
 - 区外零差只针对保存前无损帧，不延伸到有损 MP4。视觉收益需要正常尺度完整对照与连续关键窗口审阅，不能以 changed 数证明改善。

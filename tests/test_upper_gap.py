@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from upper_teeth.gap_cleanup import cleanup
+from upper_teeth.gap_cleanup import cleanup, transition_weights
 
 
 def fixture():
@@ -79,6 +79,24 @@ class CleanupTests(unittest.TestCase):
                     np.full(image.shape[:2], 2.), np.zeros(image.shape[:2], np.uint8)):
             with self.assertRaises(ValueError):
                 cleanup(image, bbox, previous=bad)
+
+    def test_reject_thin_bridge(self):
+        image, bbox = fixture()
+        image[8:17, 45:47] = [185, 175, 155]
+        image[12, 45:47] = 30
+        out, fill, state, reason = cleanup(image, bbox)
+        np.testing.assert_array_equal(out, image)
+        self.assertFalse(fill.any())
+        self.assertIsNone(state)
+        self.assertEqual(reason, 'no-coherent-vertical-gaps')
+
+    def test_offline_transition_ramp(self):
+        mask = np.array([False, True, True, True, True, False, True, False])
+        np.testing.assert_array_equal(transition_weights(mask), [0, .5, 1, 1, .5, 0, 0, 0])
+        np.testing.assert_array_equal(transition_weights(np.ones(5, bool)), [.5, 1, 1, 1, .5])
+        self.assertEqual(len(transition_weights(np.zeros(0, bool))), 0)
+        with self.assertRaises(ValueError):
+            transition_weights([0, 1])
 
     def test_zero_strength(self):
         image, bbox = fixture()

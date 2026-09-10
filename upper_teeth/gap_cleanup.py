@@ -11,6 +11,48 @@ def _shift(a, dy, dx):
     return out
 
 
+def _coherent_gaps(mask, scale):
+    """Keep vertically supported holes; reject isolated dots and thin bridges."""
+    keep = np.zeros_like(mask)
+    seen = np.zeros_like(mask)
+    h, w = mask.shape
+    for y, x in np.argwhere(mask):
+        if seen[y, x]:
+            continue
+        stack = [(int(y), int(x))]
+        seen[y, x] = True
+        points = []
+        while stack:
+            yy, xx = stack.pop()
+            points.append((yy, xx))
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ny, nx = yy + dy, xx + dx
+                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        ys, xs = np.array(points).T
+        height, width = int(ys.max()-ys.min()+1), int(xs.max()-xs.min()+1)
+        if (height >= max(2, int(np.ceil(1.5 * scale)))
+                and width <= 1.5 * height and len(points) >= max(2, int(np.ceil(scale * scale)))):
+            keep[ys, xs] = True
+    return keep
+
+
+def transition_weights(active):
+    """Bounded offline two-frame ramp; rejected frames and one-frame islands stay off."""
+    active = np.asarray(active)
+    if active.ndim != 1 or active.dtype != np.bool_:
+        raise ValueError('active must be a one-dimensional boolean sequence')
+    weights = np.zeros(len(active), np.float32)
+    for i in np.flatnonzero(active):
+        lo, hi = int(i), int(i)
+        while lo > 0 and active[lo-1]: lo -= 1
+        while hi+1 < len(active) and active[hi+1]: hi += 1
+        if hi > lo:
+            weights[i] = min(1.0, (i-lo+1)/2.0, (hi-i+1)/2.0)
+    return weights
+
+
 def cleanup(rgb, bbox, strength=0.85, previous=None):
     """Return (RGB, current allowed bool mask, alpha state or None, reason).
 
@@ -73,8 +115,12 @@ def cleanup(rgb, bbox, strength=0.85, previous=None):
     dilated = np.logical_or.reduce([_shift(seed, 0, dx) for dx in range(-radius, radius + 1)])
     closed = np.logical_and.reduce([_shift(dilated, 0, dx) for dx in range(-radius, radius + 1)])
     fill = closed & domain & ~seed & ~red
+    margin = max(1, int(round(0.5 * scale)))
+    fill[:a + margin] = False
+    fill[max(a, z - margin):] = False
+    fill = _coherent_gaps(fill, scale)
     if not fill.any():
-        return reject('no-narrow-gaps')
+        return reject('no-coherent-vertical-gaps')
     radius = min(7, max(2, int(round(2 * scale))))
     total = np.zeros_like(rgb, dtype=np.float32)
     weights = np.zeros((h, w), np.float32)

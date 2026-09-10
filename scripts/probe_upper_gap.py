@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from upper_teeth.gap_cleanup import cleanup
+from upper_teeth.gap_cleanup import cleanup, transition_weights
 
 LIMIT = 20 * 1024**3
 
@@ -149,7 +149,7 @@ def main():
     per_frame = h * w * 20 + 1024**2
     budget(n * per_frame)
     output.mkdir()
-    for name in ('before', 'after', 'allowed'):
+    for name in ('before', 'unfaded', 'after', 'allowed'):
         (output / name).mkdir()
     records, previous = [], None
     for i, before in enumerate(frames):
@@ -192,13 +192,32 @@ def main():
         if outside != 0:
             raise AssertionError('outside-allowed pixels changed')
         for name, image in (('before', cv2.cvtColor(before, cv2.COLOR_RGB2BGR)),
-                            ('after', cv2.cvtColor(after, cv2.COLOR_RGB2BGR)), ('allowed', allowed.astype(np.uint8) * 255)):
+                            ('unfaded', cv2.cvtColor(after, cv2.COLOR_RGB2BGR)), ('allowed', allowed.astype(np.uint8) * 255)):
             if not cv2.imwrite(str(output / name / f'{i:04d}.png'), image):
                 raise OSError('PNG write failed')
         records.append({'frame': args.start + i, 'reason': reason, 'changed': int(changed.sum()),
                         'allowed': int(allowed.sum()), 'outside_max': outside, 'outside0': outside == 0,
                         'anchor_to_current': matrix.tolist() if matrix is not None else None,
                         'mask_approved': False})
+    # Offline, mask-safe onset/offset ramp. Never retain a correction on a rejected
+    # frame: use lookahead within this bounded window rather than copying old teeth.
+    weights = transition_weights(np.array([rec['changed'] > 0 for rec in records], dtype=bool))
+    for i, before in enumerate(frames):
+        budget((n-i) * per_frame)
+        weight = float(weights[i])
+        raw = cv2.cvtColor(cv2.imread(str(output / 'unfaded' / f'{i:04d}.png')), cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(str(output / 'allowed' / f'{i:04d}.png'), cv2.IMREAD_GRAYSCALE) > 0
+        final = before.copy()
+        final[mask] = np.rint(before[mask].astype(np.float32)
+                             + weight * (raw[mask].astype(np.float32)-before[mask])).clip(0,255).astype(np.uint8)
+        assert np.array_equal(final[~mask], before[~mask])
+        records[i]['unfaded_changed'] = records[i]['changed']
+        records[i]['transition_weight'] = weight
+        if weight == 0 and records[i]['unfaded_changed'] > 0:
+            records[i]['reason'] = 'transient-island-suppressed'
+        records[i]['changed'] = int(np.any(final != before, axis=2).sum())
+        if not cv2.imwrite(str(output / 'after' / f'{i:04d}.png'), cv2.cvtColor(final, cv2.COLOR_RGB2BGR)):
+            raise OSError('final PNG write failed')
     def encode(command):
         budget(n * h * w * 4)
         subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-n', '-threads', '2', '-filter_threads', '2', *command],
