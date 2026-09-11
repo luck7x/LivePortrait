@@ -39,6 +39,9 @@ class SPADEDecoder(nn.Module):
             )
 
     def forward(self, feature):
+        return self.decode_features(self.forward_features(feature))
+
+    def forward_features(self, feature):
         seg = feature  # Bx256x64x64
         x = self.fc(feature)  # Bx512x64x64
         x = self.G_middle_0(x, seg)
@@ -53,6 +56,9 @@ class SPADEDecoder(nn.Module):
         x = self.up(x)  # Bx256x128x128 -> Bx256x256x256
         x = self.up_1(x, seg)  # Bx256x256x256 -> Bx64x256x256
 
+        return x
+
+    def decode_features(self, x):
         x = self.conv_img(F.leaky_relu(x, 2e-1))  # Bx64x256x256 -> Bx3xHxW
         x = torch.sigmoid(x)  # Bx3xHxW
 
