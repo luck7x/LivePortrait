@@ -22,7 +22,7 @@ python -B scripts/snapshot_upper_teeth.py \
 
 - 只允许 Linux，必须显式授权，`CUDA_VISIBLE_DEVICES` 必须是单个 `GPU-...` UUID。运行前父代理另查空闲 UUID 和用户总 GPU 额度。
 - 代码、输入、模型和所有写入路径须在授权 workspace 内；解析符号链接后复核。budget-root 与代码目录分离，output 必须是其下新的子目录，输入不得放入 budget-root。不覆盖、不删除失败产物。
-- 必须预置 `HOME/TMPDIR/TMP/TEMP/XDG_CACHE_HOME/TORCH_HOME/HF_HOME/CUDA_CACHE_PATH` 到 workspace 内已有隔离目录，`PYTHONDONTWRITEBYTECODE=1`。不安装、下载模型或建立环境。五个原权重、landmark.onnx 和完整 buffalo_l 五个 ONNX 必须已存在。
+- 必须预置 `HOME/TMPDIR/TMP/TEMP/XDG_CACHE_HOME/TORCH_HOME/HF_HOME/CUDA_CACHE_PATH` 到 workspace 内已有隔离目录，`PYTHONDONTWRITEBYTECODE=1`。不安装、下载模型或建立环境。五个原权重、landmark.onnx 和现有buffalo_l的det_10g/2d106det两个必需ONNX必须存在；不要求本流水线不用的识别、年龄或3D点模型。
 - 原模型加载仍走原 Pipeline；临时包装 `Module.load_state_dict`，即便调用方选择宽松加载，也必须检查 missing/unexpected keys 均为空。不忽略加载差异。
 - 自有 worker 独立进程组，600秒硬超时清理自有组（含ffmpeg）。使用waitid/WNOWAIT检测组长退出，先清理自有组再回收组长PID，避免遗漏后代或向复用后的PID发信号；finally恢复全部monkeypatch。仅自有 worker 设置至多 4 个可用 CPU 的 affinity，Torch/CV2、BLAS 和自有 ffmpeg 线程设为 4，不修改共享进程或全局环境。
 - GNU `du -s -B1` 使用真实分配空间，单次遍历自动去重硬链接。workspace 总上限 20GiB，budget-root **累计**上限 1GiB，不是每个 output 各 1GiB；运行保留 64MiB 安全余量，并为累计剩余额度检查 workspace 与磁盘空间。父代理监督循环约每 0.5 秒复查，worker 每25帧也检查。不能把这类轮询说成文件系统硬配额；突然外部写入仍可能导致中止。

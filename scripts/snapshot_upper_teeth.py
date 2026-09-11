@@ -181,9 +181,11 @@ def worker(args, workspace, source, driving, base, output):
     inside(cfg.models_config, workspace)
     inside(cropcfg.landmark_ckpt_path, workspace)
     buffalo = inside(Path(cropcfg.insightface_root) / 'models/buffalo_l', workspace)
-    for name in ('1k3d68.onnx', '2d106det.onnx', 'det_10g.onnx', 'genderage.onnx', 'w600k_r50.onnx'):
+    # This deployment intentionally has only the detector and 106-point landmark.
+    # Recognition, gender/age and 3D landmark models are not used by this pipeline.
+    for name in ('2d106det.onnx', 'det_10g.onnx'):
         require(inside(buffalo / name, workspace).is_file(),
-                'complete existing buffalo_l required; no downloads permitted')
+                'existing detector and landmark required; no downloads permitted')
     for model_file in buffalo.glob('*.onnx'):
         inside(model_file, workspace)
 
