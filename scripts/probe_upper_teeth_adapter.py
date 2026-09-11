@@ -198,6 +198,32 @@ def worker(args, workspace, output):
         partial['checks'] = checks
         (output / 'probe-partial.json').write_text(json.dumps(partial, indent=2))
         require(half_out == 0 and half_uint_out == 0, 'FP16 outside support leakage')
+    thin = torch.zeros_like(allowed)
+    thin[..., 350:351, 220:300] = True
+    hole = allowed.clone()
+    hole[..., 318:330, 220:250] = False
+    border = torch.zeros_like(allowed)
+    border[..., :18, :34] = True
+    checks['support_shapes_after_update'] = {}
+    for half in (False, True):
+        precision = 'fp16' if half else 'fp32'
+        checks['support_shapes_after_update'][precision] = {}
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16, enabled=half):
+            ref = g(feature)
+            for label, mask in [('thin', thin), ('hole', hole), ('border', border)]:
+                vis = mask.float()
+                out = model(feature, structure, vis, mask)
+                outside_mask = (~mask).expand_as(out)
+                df = (out-ref).abs()[outside_mask].max().item()
+                du = (uint8(out).int()-uint8(ref).int()).abs()[outside_mask].max().item()
+                cells = safe_feature_mask(mask, vis).sum().item()
+                checks['support_shapes_after_update'][precision][label] = {
+                    'outside_float_max': df, 'outside_uint8_max': du, 'safe_cells': cells}
+                partial['checks'] = checks
+                (output / 'probe-partial.json').write_text(json.dumps(partial, indent=2))
+                require(df == 0 and du == 0, precision + ' ' + label + ' support leakage')
+                if cells == 0:
+                    exact(out, ref, label + ' zero-support fallback')
     require(frozen == {'g': state_hash(g), 'w': state_hash(w), 'original': state_hash(original)}, 'base state/buffer mutation')
     checkpoint = {'adapter': model.adapter.state_dict(), 'base_weight_hashes': {str(p): h for p, h in weights.items()},
                   'code_sha': code, 'architecture': {'width': model.width, 'max_delta': model.max_delta}, 'synthetic': True}

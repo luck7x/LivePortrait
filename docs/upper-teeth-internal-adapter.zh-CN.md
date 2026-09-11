@@ -41,10 +41,10 @@ provenance 必须是原 causal probe 的 completed/postflight_verified 记录；
 
 通过 `git show 31c26a497cedf336a813e18b61e96239f7cab878:src/modules/spade_generator.py` 在正确 package 下执行可信历史源码，同原权重严格加载，独立比较 state_dict 和真实输出，非新 G 自比。
 
-探针检查 FP32/FP16 下历史 G、拆分 G、默认调用与 zero-init 的 tensor/uint8 精确一致；真实 W 特征上使用**合成矩形与合成条件**做 3 步 Adam，只更新 adapter，目标仅 baseline 加 .01 局部数值偏移，不是客户牙形 GT。验证有限非零梯度、实际变化、更新后FP32/FP16的float/uint8区外零差、空/不可见回退、全部 base 参数与 buffer 不变、五权重文件不变以及 adapter-only `synthetic-smoke.pt` 的 weights_only 复载精确一致。没有导出人脸图片或视频。
+探针检查 FP32/FP16 下历史 G、拆分 G、默认调用与 zero-init 的 tensor/uint8 精确一致；真实 W 特征上使用**合成矩形与合成条件**做 3 步 Adam，只更新 adapter，目标仅 baseline 加 .01 局部数值偏移，不是客户牙形 GT。验证有限非零梯度、实际变化、更新后FP32/FP16的float/uint8区外零差、空/不可见回退、全部 base 参数与 buffer 不变、五权重文件不变以及 adapter-only `synthetic-smoke.pt` 的 weights_only 复载精确一致。另以更新后的head在FP32/FP16检查1像素薄条、矩形内洞、贴画布边界的合成mask；零安全特征格必须精确回退。没有导出人脸图片或视频。
 
 外层只监督自己新建的进程组，300 秒硬超时，GNU du 实际分配空间项目上限 20GiB、输出上限 128MiB；超限/差异/验证错误立即失败，不删文件、不宣成功。只写checkpoint和JSON，不导出人脸美化图或大量帧文件。probe-partial.json是验收前中间值，accepted=false，不是成功记录；失败目录保留供父代理检查。
 
 ## 尚未验证/不能推出
 
-本地只允许 NumPy/AST，真实 Torch、autocast、梯度、CUDA 零差与复载均需父代理远程执行。即使探针成功也只证明 model-internal connectivity；不证明牙齿范围正确、自然度改善、全片稳定或 pasteback 区外保护。结构生成、训练数据准入、真实牙形训练和连续视觉验收仍缺失。
+本地只允许 NumPy/AST，真实 Torch、autocast、梯度、CUDA 零差与复载均需父代理远程执行。即使探针成功也只证明 model-internal connectivity；不证明牙齿范围正确、自然度改善、全片稳定或 pasteback 区外保护。结构生成、训练数据准入、真实牙形训练和连续视觉验收仍缺失。合成检查点仅供机制复载测试，不用于正式推理或作为真实牙形训练的初始化；后者应重新零初始化。
