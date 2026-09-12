@@ -162,9 +162,12 @@ def gate_counts(samples):
         counts[split] = {'selected_frames': len(rows),
                          'alignment_rejected_frames': sum(s['stats'].get('alignment_rejected', False) for s in rows),
                          'positive_frames': len(positive), 'event_positive_frames': len(events),
-                         'event_adjacent_positive_pairs': sum(f+1 in events for f in events)}
+                         'event_adjacent_positive_pairs': sum(f+1 in events for f in events),
+                         'all_adjacent_positive_pairs': sum(f+1 in positive for f in positive)}
     train = counts['train']
-    return counts, train['event_positive_frames'] >= 8 and train['event_adjacent_positive_pairs'] >= 2
+    # Eight positive frames was the overall data floor, not eight frames in a
+    # thirteen-frame event list containing closed/occluded frames by design.
+    return counts, train['positive_frames'] >= 8 and train['all_adjacent_positive_pairs'] >= 2
 
 
 def verify_contract(data):
@@ -245,8 +248,9 @@ def worker(workspace, data, output, base):
               'data_report_sha256': report_hash, 'data_code_sha': report['code_sha'],
               'label_code_sha256': sha256(Path(__file__)), 'ROI': list(ROI), 'samples': samples,
               'all_truth_files_sha256': truth, 'valid_frame_counts': counts, 'data_gate': passed,
-              'event_frames': sorted(EVENTS), 'gate_thresholds': {'train_event_positive_frames': 8,
-                  'train_event_adjacent_positive_pairs': 2},
+              'event_frames': sorted(EVENTS), 'gate_thresholds': {'train_positive_frames': 8,
+                  'train_adjacent_positive_pairs': 2},
+              'gate_revision': 'Restore originally requested overall positive-frame floor; event coverage remains a separate disclosed statistic. No mask pixels or unknown labels changed.',
               'notes': 'Candidate topology and gate truth require independent visual review. No human approval; '
                        'unresolved mouth is unknown, not a negative. Numeric gate is not training approval.',
               'worker_wall_seconds': time.monotonic()-started, 'budget_after': budget(workspace, base)}

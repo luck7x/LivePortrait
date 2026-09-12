@@ -129,7 +129,10 @@ class RealLabelsTests(unittest.TestCase):
         rows = [sample('train', f) for f in (224, 225, 226, 227, 228, 229, 253, 254)]
         self.assertTrue(gate_counts(rows)[1])
         rows = [sample('train', f) for f in range(442, 472)]
-        self.assertFalse(gate_counts(rows)[1])
+        counts, passed = gate_counts(rows)
+        self.assertTrue(passed)
+        self.assertEqual(counts['train']['event_positive_frames'], 0)
+        self.assertEqual(counts['train']['all_adjacent_positive_pairs'], 29)
 
 
 if __name__ == '__main__':
