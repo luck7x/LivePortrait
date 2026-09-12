@@ -21,12 +21,12 @@ if TENSORS:
 
 
 class StaticContractTests(unittest.TestCase):
-    def test_pointwise_architecture_and_no_external_dependencies(self):
+    def test_context_architecture_and_no_external_dependencies(self):
         tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
         convs = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute) and n.func.attr == 'Conv2d']
         self.assertEqual(len(convs), 4)
-        self.assertTrue(all(ast.literal_eval(n.args[2]) == 1 for n in convs))
+        self.assertEqual(sorted(ast.literal_eval(n.args[2]) for n in convs), [1, 1, 1, 3])
         imports = [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
         self.assertEqual(imports, ['torch'])
         methods = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -85,7 +85,7 @@ class TensorContractTests(unittest.TestCase):
             self.head.backbone[0].weight[0, 0, 0, 0] = 1
             self.head.backbone[2].weight.zero_()
             self.head.backbone[2].bias.zero_()
-            self.head.backbone[2].weight[0, 0, 0, 0] = 1
+            self.head.backbone[2].weight[0, 0, 1, 1] = 1
             self.head.gate_head.weight[0, 0, 0, 0] = 20
             self.head.gate_head.bias.fill_(-4)
         predicted = self.head(self.features)

@@ -20,7 +20,7 @@ from scripts.snapshot_upper_teeth import (OwnedProcessGroup, array_hash, audio_s
 from scripts.probe_upper_tail_capacity import bounded_npz
 
 SHAPE = (1, 1, 50, 120)
-ARCH = 'contact-boundary-pointwise-v1'
+ARCH = 'contact-boundary-context3-v2'
 LABEL_KEYS = {'allowed', 'target_delta', 'uncertain', 'protected'}
 
 

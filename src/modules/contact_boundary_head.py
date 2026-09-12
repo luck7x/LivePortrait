@@ -1,4 +1,4 @@
-"""Experimental pointwise native-logit head; predicted gates are not semantic masks.
+"""Experimental contextual native-logit head; predicted gates are not semantic masks.
 
 The pipeline supplies genuine current/previous base hidden states, never corrected
 outputs. No temporal state, RGB input, coordinates, or target masks are stored here.
@@ -64,7 +64,7 @@ class ContactBoundaryHead(nn.Module):
             raise ValueError('channel_scale must be nonnegative RMS [1,32,1,1]')
         self.register_buffer('channel_scale', channel_scale.detach().float().clone().clamp_min(1e-4))
         self.backbone = nn.Sequential(nn.Conv2d(32, 32, 1), nn.ReLU(),
-                                      nn.Conv2d(32, 32, 1), nn.ReLU())
+                                      nn.Conv2d(32, 32, 3, padding=1), nn.ReLU())
         self.gate_head = nn.Conv2d(32, 1, 1)
         self.delta_head = nn.Conv2d(32, 1, 1)
         nn.init.constant_(self.gate_head.bias, -4.)

@@ -79,6 +79,10 @@ train 必含 225/226/227/228/251/252；validation 必含 254–259 连续段及 
 
 保护与审美范围只准用于这个有限诊断实验；`human_semantic_mask_approved` 保持 false，不能升级成正式真实标签批准。
 
+## r2：局部上下文门控对照
+
+首版0f98499使用两层1×1，真实训练出现train负例误激活。r2只将backbone第二层改为3×3/padding1，加入局部边界上下文；末端gate/delta仍1×1，修正仍在所有计算之后乘gate、点对点加入原logits，因此predicted gate外数值支持域不扩大。shape变化另用arch=contact-boundary-context3-v2，重新初始化，不读取旧checkpoint。数据、固定阈值/强度、600+300步及留出不变。该修订依据train误激活，已有validation已被查看，因此不能将r2的相同留出称为完全未经开发观察的新测试集。
+
 ## 固定训练，不看验证调参
 
 1. 只用 train features 计算 FP64 累积、FP32 保存的 32 通道 RMS，固定 `[1,32,1,1]` scale；模型自身保持 `1e-4` 下限。验证样本不进入 RMS。
