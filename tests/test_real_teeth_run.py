@@ -1,6 +1,7 @@
 """Local static/NumPy tests: never import Torch/CV2 or execute a model."""
 import ast
 import copy
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -212,8 +213,12 @@ class StaticIsolationTests(unittest.TestCase):
             if isinstance(node, ast.ImportFrom):
                 self.assertNotIn(node.module.split('.')[0], ('torch', 'cv2'))
         # Transitive runner helpers must remain import-safe too.
-        self.assertNotIn('torch', sys.modules)
-        self.assertNotIn('cv2', sys.modules)
+        # Other opt-in Linux tensor tests can import Torch in the discovery process.
+        # The invariant is that this module's clean import does not load it.
+        subprocess.run([sys.executable, '-B', '-c',
+            "import sys; from scripts import run_real_teeth; "
+            "assert 'torch' not in sys.modules and 'cv2' not in sys.modules"],
+            cwd=ROOT, check=True, timeout=20)
 
     def test_render_has_no_teacher_or_cached_feature_predictor_calls(self):
         text = source('render_stage')
