@@ -64,19 +64,19 @@ class CompensationTests(unittest.TestCase):
         self.assertEqual(args.stage, 'mouth-compensation:clip118:dynamic')
         self.assertIsNone(args.checkpoint)
         self.assertFalse(args.authorize_source_mouth)
-        old = (probe.base.parser, probe.base.worker, probe.base.__file__)
+        old = (probe.base.parser, probe.base.worker, probe.base.__file__, probe.base.check_paths)
         def fail():
             self.assertIs(probe.base.worker, probe.worker)
             self.assertEqual(probe.base.__file__, probe.__file__)
             raise RuntimeError('supervisor test')
         with patch.object(probe.base, 'main', side_effect=fail):
             with self.assertRaisesRegex(RuntimeError, 'supervisor test'): probe.main()
-        self.assertEqual(old, (probe.base.parser, probe.base.worker, probe.base.__file__))
+        self.assertEqual(old, (probe.base.parser, probe.base.worker, probe.base.__file__, probe.base.check_paths))
 
     def test_clip80_requires_selection_and_one_completed_mode(self):
         args = SimpleNamespace(driver='clip80', selected_for_clip80=False)
         report = {'ArgumentConfig': {'driving':'driver'}, 'inputs_before':{'driver':probe.DRIVERS['clip80']}}
-        with tempfile.TemporaryDirectory() as tmp, patch.object(probe.base, 'check_config', return_value=probe.base.TWO_DRIVER_SOURCE):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(probe, 'validate_source_config', return_value=probe.base.TWO_DRIVER_SOURCE):
             root = Path(tmp)
             with self.assertRaisesRegex(RuntimeError, 'select'): probe.validate_route(args, report, root, root/'new')
             args.selected_for_clip80 = True
@@ -84,6 +84,55 @@ class CompensationTests(unittest.TestCase):
             (root/'done').mkdir()
             (root/'done/report.json').write_text(json.dumps({'kind':'mouth-compensation','driver':'clip80','status':'completed'}))
             with self.assertRaisesRegex(RuntimeError, 'already completed'): probe.validate_route(args, report, root, root/'new')
+
+    def test_compensation_sibling_layout_preserves_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve(); code = root/'code'; code.mkdir()
+            budget = root/'budget'; budget.mkdir(); snapshot = budget/'v1'; snapshot.mkdir()
+            args = probe.parser().parse_args(['--workspace',str(root),'--snapshot',str(snapshot),
+                '--budget-root',str(budget),'--output',str(budget/'v2'),'--driver','clip118','--mode','dynamic'])
+            stage = args.stage
+            with patch.object(probe.base, 'ROOT', code):
+                self.assertEqual(probe.check_paths(args)[-1], budget/'v2')
+                self.assertEqual(args.stage, stage)
+                for bad in (snapshot, snapshot/'nested', budget/'nested/v2', code/'v2'):
+                    args.output = str(bad)
+                    with self.assertRaises(RuntimeError): probe.check_paths(args)
+                args.output = str(budget/'v2'); args.stage = 'off'
+                with self.assertRaises(RuntimeError): probe.check_paths(args)
+
+    def test_source_whitelist_flags_and_actual_metadata(self):
+        yes = ('flag_normalize_lip', 'flag_stitching', 'flag_relative_motion', 'flag_use_half_precision', 'flag_do_crop')
+        no = ('flag_eye_retargeting', 'flag_lip_retargeting', 'flag_do_torch_compile',
+              'flag_source_video_eye_retargeting', 'flag_crop_driving_video')
+        cfg = dict.fromkeys(yes, True) | dict.fromkeys(no, False) | {
+            'driving_multiplier': 1, 'animation_region': 'all', 'driving_option': 'expression-friendly'}
+        report = {'cfg': cfg, 'ArgumentConfig': {'source': 'photo', 'driving': 'driver'},
+                  'inputs_before': {'photo': probe.NEW_JPG_SOURCE, 'driver': probe.DRIVERS['clip118']}}
+        for source_sha in (probe.base.TWO_DRIVER_SOURCE, probe.NEW_JPG_SOURCE):
+            report['inputs_before']['photo'] = source_sha
+            self.assertEqual(probe.validate_source_config(report), source_sha)
+            self.assertEqual(probe.validate_route(SimpleNamespace(driver='clip118'), report, None, None), source_sha)
+        report['inputs_before']['photo'] = 'f' * 64
+        with self.assertRaisesRegex(RuntimeError, 'source SHA'): probe.validate_source_config(report)
+        report['inputs_before']['photo'] = probe.NEW_JPG_SOURCE
+        for key in (*yes, *no, 'driving_multiplier', 'animation_region', 'driving_option'):
+            previous = cfg[key]
+            cfg[key] = not previous if isinstance(previous, bool) else (.5 if key == 'driving_multiplier' else 'wrong')
+            with self.assertRaises(RuntimeError): probe.validate_source_config(report)
+            cfg[key] = previous
+        tree = ast.parse(Path(probe.__file__).read_text(encoding='utf-8'))
+        worker = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'worker')
+        assignments = [n for n in ast.walk(worker) if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id == 'source_sha' for t in n.targets)]
+        self.assertEqual(ast.unparse(assignments[0].value.func), 'validate_route')
+        metadata = [k.value for n in ast.walk(worker) if isinstance(n, ast.Call)
+                    for k in n.keywords if k.arg == 'source_sha256']
+        self.assertEqual([ast.unparse(v) for v in metadata], ['source_sha'])
+        text = Path(probe.__file__).read_text(encoding='utf-8')
+        self.assertNotIn('base.check_config(', text)
+        self.assertIn('active = source_ratio >= cfg.lip_normalize_threshold', text)
+        self.assertIn('require(len(cursors) == int(active)', text)
 
     def test_ast_order_and_no_student_or_pixel_patch(self):
         source = Path(probe.__file__).read_text(encoding='utf-8')

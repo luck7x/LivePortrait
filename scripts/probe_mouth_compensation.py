@@ -16,6 +16,8 @@ from scripts.snapshot_upper_teeth import array_hash, code_check, inside, require
 from scripts.probe_upper_tail_capacity import bounded_npz
 
 MODES = ('fixed-half', 'fixed-three-quarter', 'dynamic')
+NEW_JPG_SOURCE = 'cec1314cb81c43a476ba827779e5b0ee4888753fdca6c881cbaf739c766ed759'
+SOURCE_HASHES = frozenset((base.TWO_DRIVER_SOURCE, NEW_JPG_SOURCE))
 DRIVERS = {'clip118': 'd06610401c8de2f19a008142bea4c3123b8617e3b2f38f5ee9bf510ee06c7eda',
            'clip80': '506fda347ecd7a20a79a33df9ebc2493816455c7bdd63c8c2ec0cb28d45928fe'}
 
@@ -49,9 +51,21 @@ class DeltaCursor:
             self.live.copy_(self.original * float(self.alphas[self.next_frame]))
 
 
+def validate_source_config(report):
+    cfg = report['cfg']
+    require(all(cfg[k] is True for k in ('flag_normalize_lip', 'flag_stitching', 'flag_relative_motion',
+            'flag_use_half_precision', 'flag_do_crop')) and all(cfg[k] is False for k in ('flag_eye_retargeting',
+            'flag_lip_retargeting', 'flag_do_torch_compile', 'flag_source_video_eye_retargeting',
+            'flag_crop_driving_video')) and cfg['driving_multiplier'] == 1 and cfg['animation_region'] == 'all'
+            and cfg['driving_option'] == 'expression-friendly',
+            'expected original ON/stitch/relative/FP16 configuration')
+    source_sha = report['inputs_before'][report['ArgumentConfig']['source']]
+    require(source_sha in SOURCE_HASHES, 'unapproved source SHA')
+    return source_sha
+
+
 def validate_route(args, report, budget, output):
-    # Existing validator checks the ded9 source and unchanged ON configuration only.
-    require(base.check_config(report, 'student') == base.TWO_DRIVER_SOURCE, 'wrong fixed source')
+    source_sha = validate_source_config(report)
     driving = report['ArgumentConfig']['driving']
     require(report['inputs_before'][driving] == DRIVERS[args.driver], 'driver route/hash mismatch')
     if args.driver == 'clip80':
@@ -61,6 +75,7 @@ def validate_route(args, report, budget, output):
                 prior = base.read_json(path, 32 * 2**20)
                 require(not (prior.get('kind') == 'mouth-compensation' and prior.get('driver') == 'clip80'
                              and prior.get('status') == 'completed'), 'clip80 candidate already completed; no additional trial')
+    return source_sha
 
 
 def collect_keys(report, arrays, crop, canvas, template, alphas, workspace, budget, torch):
@@ -175,7 +190,7 @@ def worker(args, workspace, snapshot, budget, output):
     code = code_check()
     try:
         report, arrays, manifest = base.prep.load_inputs(snapshot, workspace, manifest)
-        validate_route(args, report, budget, output)
+        source_sha = validate_route(args, report, budget, output)
         base.verify_blobs(report['code_sha'], (*base.real.CORE, 'src/live_portrait_pipeline.py', 'src/live_portrait_wrapper.py',
             'src/modules/motion_extractor.py', 'src/modules/convnextv2.py', 'src/modules/stitching_retargeting_network.py',
             'src/utils/camera.py', 'src/utils/retargeting_utils.py', 'src/utils/helper.py', 'src/utils/resources/lip_array.pkl',
@@ -202,7 +217,7 @@ def worker(args, workspace, snapshot, budget, output):
             formula='fixed .5/.75 or 1-.5*smoothstep(clamp((r-.03)/(.25-.03),0,1)); no EMA',
             trace=trace, input_hashes=manifest, source_snapshot_arrays=report['snapshot_arrays'],
             base_before=before, base_after=base.states(models), weights_before=report['weights_before'],
-            weights_after={p: sha256(p) for p in report['weights_before']}, source_sha256=base.TWO_DRIVER_SOURCE,
+            weights_after={p: sha256(p) for p in report['weights_before']}, source_sha256=source_sha,
             source_redetected=False, source_F_recomputed=False, student_loaded=False, GT_or_label_input=False,
             worker_wall_seconds=time.monotonic()-started, peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
             files=base.real.inventory(output), supervisor_verified=False)
@@ -234,12 +249,27 @@ def parser():
     return p
 
 
+_original_check_paths = base.check_paths
+
+
+def check_paths(args):
+    require(args.driver in DRIVERS and args.mode in MODES and
+            args.stage == 'mouth-compensation:' + args.driver + ':' + args.mode,
+            'unexpected compensation route')
+    layout_args = copy.copy(args)
+    # Reuse only the existing strict sibling layout validation, not student inference.
+    # Original args/stage/ledger remain unchanged; source allowlist is checked by worker.
+    layout_args.stage = 'student'
+    return _original_check_paths(layout_args)
+
+
 def main():
     # Process-scoped supervisor adapter only. Spawn this entry point, including --_worker.
     # ExitStack restores every adapted global on exceptions; motion hooks have their own stack.
     with ExitStack() as stack:
         stack.enter_context(patch.object(base, 'parser', parser))
         stack.enter_context(patch.object(base, 'worker', worker))
+        stack.enter_context(patch.object(base, 'check_paths', check_paths))
         stack.enter_context(patch.object(base, '__file__', __file__))
         base.main()
 
