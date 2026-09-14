@@ -7,6 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import numpy as np
 from scripts import probe_source_mouth as probe
 
@@ -39,6 +40,59 @@ class SourceMouthTests(unittest.TestCase):
         cfg['flag_normalize_lip'] = False
         with self.assertRaises(RuntimeError):
             probe.check_config(report, 'off')
+
+    def test_student_sibling_paths_and_rejections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve(); code = root / 'code'; code.mkdir()
+            base = root / 'processing'; base.mkdir()
+            snapshot = base / 'first'; snapshot.mkdir()
+            output = base / 'candidate'
+            args = SimpleNamespace(workspace=str(root), snapshot=str(snapshot), budget_root=str(base),
+                                   output=str(output), stage='student', _worker=False)
+            with patch.object(probe, 'ROOT', code):
+                self.assertEqual(probe.check_paths(args), (root, snapshot, base, output))
+                for bad in (snapshot, snapshot/'nested', base, base/'nested/candidate'):
+                    args.output = str(bad)
+                    with self.assertRaises(RuntimeError):
+                        probe.check_paths(args)
+                args.output = str(output); args.stage = 'off'
+                with self.assertRaises(RuntimeError):
+                    probe.check_paths(args)
+                args.stage = 'student'; args.snapshot = str(base/'missing')
+                with self.assertRaises((RuntimeError, FileNotFoundError)):
+                    probe.check_paths(args)
+                args.snapshot = str(snapshot); output.mkdir()
+                with self.assertRaises(RuntimeError):
+                    probe.check_paths(args)
+                args._worker = True
+                self.assertEqual(probe.check_paths(args)[-1], output)
+                args._worker = False; args.output = str(code/'budget/candidate'); args.budget_root = str(code/'budget')
+                with self.assertRaises(RuntimeError):
+                    probe.check_paths(args)
+                args.budget_root = str(root); args.output = str(root/'candidate')
+                with self.assertRaises(RuntimeError):
+                    probe.check_paths(args)
+                external = root/'separate-snapshot'; external.mkdir()
+                args.snapshot = str(external); args.budget_root = str(base); args.output = str(base/'off-new'); args.stage='off'
+                self.assertEqual(probe.check_paths(args)[1], external)
+
+    def test_symlink_escape_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            root=Path(tmp).resolve(); code=root/'code'; code.mkdir(); base=root/'processing'; base.mkdir()
+            link=root/'escaped'
+            try:
+                link.symlink_to(Path(other).resolve(), target_is_directory=True)
+            except OSError as exc:
+                self.skipTest('OS does not grant symlink creation: ' + str(exc))
+            args=SimpleNamespace(workspace=str(root),snapshot=str(link),budget_root=str(base),
+                                 output=str(base/'candidate'),stage='student',_worker=False)
+            with patch.object(probe,'ROOT',code):
+                with self.assertRaises(RuntimeError):
+                    probe.check_paths(args)
+                inside_snapshot=root/'valid'; inside_snapshot.mkdir(); args.snapshot=str(inside_snapshot)
+                args.budget_root=str(link); args.output=str(link/'candidate')
+                with self.assertRaises(RuntimeError):
+                    probe.check_paths(args)
 
     def test_configuration_arrays_not_replaced(self):
         value = np.zeros((2, 2), np.float32)

@@ -406,12 +406,34 @@ def parser():
     return p
 
 
+def check_paths(args):
+    workspace = Path(args.workspace).resolve(strict=True)
+    require(workspace.is_dir(), 'workspace must be directory')
+    inside(ROOT, workspace)
+    snapshot = inside(args.snapshot, workspace)
+    require(snapshot.is_dir(), 'snapshot must be directory')
+    base = inside(args.budget_root, workspace, exists=False)
+    output = inside(args.output, workspace, exists=False)
+    require(not Path(args.output).is_symlink() and not Path(args.budget_root).is_symlink(), 'symlink output/budget forbidden')
+    require(output != base and output.is_relative_to(base), 'output must be below budget-root')
+    require(not base.is_relative_to(ROOT) and not ROOT.is_relative_to(base), 'budget-root must be separate from code')
+    require(not output.is_relative_to(snapshot) and not snapshot.is_relative_to(output), 'snapshot/output overlap')
+    siblings = args.stage == 'student' and snapshot.parent == base and output.parent == base
+    require(siblings or (not snapshot.is_relative_to(base) and not base.is_relative_to(snapshot)),
+            'snapshot/budget overlap allowed only for distinct direct student siblings')
+    if getattr(args, '_worker', False):
+        require(output.is_dir(), 'supervised worker output must exist')
+    else:
+        require(not output.exists(), 'output must be new')
+    return workspace, snapshot, base, output
+
+
 def main():
     started = time.monotonic()
     args = parser().parse_args()
     require((args.stage == 'student') == bool(args.checkpoint), 'checkpoint required only for student')
     require(sys.platform == 'linux' and args.authorize_source_mouth, 'explicit authorized Linux execution required')
-    workspace, snapshot, base, output = prep.check_paths(args)
+    workspace, snapshot, base, output = check_paths(args)
     for key in ('HOME', 'TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'TORCH_HOME', 'HF_HOME', 'CUDA_CACHE_PATH'):
         require(bool(os.environ.get(key)) and inside(os.environ[key], workspace).is_dir(), 'missing isolated ' + key)
     require(os.environ.get('PYTHONDONTWRITEBYTECODE') == '1' and
