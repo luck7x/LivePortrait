@@ -25,8 +25,13 @@ class SourceMouthTests(unittest.TestCase):
         yes = ('flag_relative_motion', 'flag_stitching', 'flag_normalize_lip', 'flag_use_half_precision', 'flag_do_crop')
         no = ('flag_eye_retargeting', 'flag_lip_retargeting', 'flag_source_video_eye_retargeting', 'flag_do_torch_compile', 'flag_crop_driving_video')
         cfg = dict.fromkeys(yes, True) | dict.fromkeys(no, False) | dict(driving_multiplier=1, animation_region='all', driving_option='expression-friendly')
-        report = dict(cfg=cfg, inputs_before={'source': probe.NEW}, ArgumentConfig={'source': 'source'})
-        self.assertEqual(probe.check_config(report, 'student'), probe.NEW)
+        report = dict(cfg=cfg, inputs_before={'source': probe.TWO_DRIVER_SOURCE}, ArgumentConfig={'source': 'source'})
+        self.assertEqual(probe.check_config(report, 'student'), probe.TWO_DRIVER_SOURCE)
+        with self.assertRaises(RuntimeError):
+            probe.check_config(report, 'off')
+        report['inputs_before']['source'] = probe.NEW
+        with self.assertRaises(RuntimeError):
+            probe.check_config(report, 'student')
         report['inputs_before']['source'] = probe.OLD
         self.assertEqual(probe.check_config(report, 'off'), probe.OLD)
         with self.assertRaises(RuntimeError):

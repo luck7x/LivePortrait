@@ -1,6 +1,7 @@
 """Local-safe tests: stdlib/NumPy only; never import model or CV modules."""
 import ast
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -107,6 +108,72 @@ class SnapshotTests(unittest.TestCase):
         video['streams'][0]['nb_read_frames'] = '580'
         with self.assertRaises(RuntimeError):
             snapshot.check_video(video)
+
+    def test_portrait_driver_admission(self):
+        info = {'streams': [{'nb_read_frames': '581', 'avg_frame_rate': '25/1', 'duration': '23.24',
+                             'width': 720, 'height': 1280}]}
+        self.assertEqual(snapshot.check_driver(info)['width'], 720)
+        for width, height in ((720, 1281), (0, 1280), (1920, 1080)):
+            info['streams'][0].update(width=width, height=height)
+            with self.assertRaises(RuntimeError):
+                snapshot.check_driver(info)
+        info['streams'][0].update(width=720, height=1280, nb_read_frames='580')
+        with self.assertRaises(RuntimeError):
+            snapshot.check_driver(info)
+
+    def test_source_cache_integrity_and_source_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            cache = root / 'first'; cache.mkdir()
+            source = root / 'source.png'; source.write_bytes(b'original-photo')
+            values = self.valid_arrays()
+            np.savez_compressed(cache / 'source_snapshot.npz', **values)
+            crop = {'lmk_crop': np.zeros((203, 2), np.float32)}
+            np.savez(cache / 'source_crop.npz', **crop)
+            (cache / 'source_canvas.png').write_bytes(b'canvas-file-not-opened-by-numeric-loader')
+            report = dict(status='completed', supervisor_verified=True, code_sha='a'*40,
+                weights_before={}, weights_after={}, base_before={}, base_after={},
+                inputs_before={str(source): snapshot.sha256(source)}, inputs_after={str(source): snapshot.sha256(source)},
+                ArgumentConfig={'source': str(source), 'driving': 'never-open-old-driver'},
+                snapshot_arrays=snapshot.validate_snapshot(values),
+                crop_arrays={k: dict(shape=list(v.shape), dtype=str(v.dtype), array_sha256=snapshot.array_hash(v)) for k,v in crop.items()},
+                files={name: snapshot.sha256(cache/name) for name in ('source_snapshot.npz','source_crop.npz','source_canvas.png')})
+            report_path = cache / 'report.json'
+            report_path.write_text(json.dumps(report), encoding='utf-8')
+            (cache / 'supervisor.json').write_text(json.dumps(dict(status='completed',returncode=0)), encoding='utf-8')
+            result = snapshot.load_source_cache(cache, root, source, 'a'*40)
+            self.assertEqual(set(result['arrays']), {'source_input', 'F', 'x_s'})
+            self.assertNotIn('final_k', result['arrays'])
+            self.assertFalse((cache/'driving_motion.npz').exists())
+            self.assertEqual(len(result['files']), 5)
+            with self.assertRaisesRegex(RuntimeError, 'same code'):
+                snapshot.load_source_cache(cache, root, source, 'b'*40)
+            with self.assertRaises(RuntimeError):
+                snapshot.load_source_cache(root.parent, root, source, 'a'*40)
+            source.write_bytes(b'wrong-photo')
+            with self.assertRaisesRegex(RuntimeError, 'photo SHA'):
+                snapshot.load_source_cache(cache, root, source, 'a'*40)
+            source.write_bytes(b'original-photo')
+            (cache/'source_canvas.png').write_bytes(b'changed')
+            with self.assertRaisesRegex(RuntimeError, 'file hash'):
+                snapshot.load_source_cache(cache, root, source, 'a'*40)
+
+    def test_new_supervisor_status_and_budget_parser(self):
+        self.assertEqual(snapshot.supervisor_status(0, True), 'completed')
+        for rc, verified in ((0, False), (1, True), (None, False)):
+            self.assertEqual(snapshot.supervisor_status(rc, verified), 'failed')
+        args = snapshot.parser().parse_args(['--workspace','w','--source','s','--driving','d',
+            '--output','o','--budget-root','b','--source-cache','first','--max-new-mib','512'])
+        self.assertEqual((args.source_cache, args.max_new_mib), ('first', 512))
+        text = SCRIPT.read_text(encoding='utf-8')
+        self.assertIn('previous = elapsed_charge(base)', text)
+        self.assertIn("'cumulative_wall_seconds': previous + wall", text)
+        self.assertIn('IMAGEIO_FFMPEG_NO_PREVENT_SIGINT', text)
+        self.assertIn("array_hash(arr(xs)) == array_hash(cache['arrays']['x_s'])", text)
+        self.assertIn('return original_driving_crop(*a, **kw)', text)
+        self.assertIn('template = original_template(images, *a, **kw)', text)
+        self.assertIn("actual_driving_auto_crop = bool(driving_crop_calls)", text)
+        self.assertIn("result = original_extract(x)", text)
 
     def test_audio_contract_preserves_timestamps(self):
         keys = ('pts', 'dts', 'duration', 'pts_time', 'dts_time', 'duration_time', 'size', 'data_hash')

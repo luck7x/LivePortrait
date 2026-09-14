@@ -88,6 +88,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('workspace', 'source', 'driving', 'output', 'budget-root'):
         p.add_argument('--' + name, required=True)
+    p.add_argument('--source-cache', help='Verified same-source snapshot; never reuse driving motion/K')
+    p.add_argument('--max-new-mib', type=int, choices=(512, 1024), default=1024)
     p.add_argument('--authorize-experimental', action='store_true')
     p.add_argument('--_worker', action='store_true', help=argparse.SUPPRESS)
     return p
@@ -106,7 +108,52 @@ def check_paths(args):
     require(output != base and output.is_relative_to(base), 'output must be below budget-root')
     require(not base.is_relative_to(ROOT) and not ROOT.is_relative_to(base), 'budget-root must be separate from code')
     require(not source.is_relative_to(base) and not driving.is_relative_to(base), 'inputs must be outside budget-root')
+    if args.source_cache:
+        cache = inside(args.source_cache, workspace)
+        require(cache.is_dir() and not output.is_relative_to(cache) and not cache.is_relative_to(output), 'source-cache/output overlap')
     return workspace, source, driving, base, output
+
+
+def check_driver(info):
+    stream = check_video(info)
+    require(0 < min(stream['width'], stream['height']) and max(stream['width'], stream['height']) <= 1280,
+            'driver dimensions must be positive and maxdim <=1280')
+    return stream
+
+
+def load_source_cache(directory, workspace, source, code):
+    # Numeric/source-only return contract: old final_k is validated but never returned.
+    from scripts.probe_upper_tail_capacity import bounded_npz
+    directory = inside(directory, workspace)
+    manifest = {}
+    def file(name):
+        path = inside(directory / name, directory)
+        manifest[str(path)] = sha256(path)
+        return path
+    path = file('report.json')
+    require(path.stat().st_size <= 32 * 2**20, 'cache report size limit')
+    report = json.loads(path.read_text(encoding='utf-8'))
+    supervisor = json.loads(file('supervisor.json').read_text(encoding='utf-8'))
+    require(report['status'] == supervisor['status'] == 'completed' and report['supervisor_verified'] is True and
+            supervisor['returncode'] == 0 and report['code_sha'] == code and
+            report['weights_before'] == report['weights_after'] and report['base_before'] == report['base_after'] and
+            report['inputs_before'] == report['inputs_after'], 'source cache not verified/immutable/same code')
+    require(sha256(source) == report['inputs_before'][report['ArgumentConfig']['source']], 'source cache photo SHA differs')
+    for name in ('source_snapshot.npz', 'source_crop.npz', 'source_canvas.png'):
+        require(sha256(file(name)) == report['files'][name], 'source cache file hash differs: ' + name)
+    values = bounded_npz(directory / 'source_snapshot.npz', 12, {'source_input', 'F', 'x_s', 'final_k'})
+    require(validate_snapshot(values) == report['snapshot_arrays'], 'source cache array mismatch')
+    crop = bounded_npz(directory / 'source_crop.npz', 16, set(report['crop_arrays']))
+    for key, value in crop.items():
+        meta = report['crop_arrays'][key]
+        require(value.dtype.kind in 'buif' and np.isfinite(value).all() and list(value.shape) == meta['shape'] and
+                str(value.dtype) == meta['dtype'] and array_hash(value) == meta['array_sha256'], 'cache crop mismatch')
+    return {'arrays': {k: values[k] for k in ('source_input', 'F', 'x_s')}, 'crop': crop,
+            'canvas_path': directory / 'source_canvas.png', 'report': report, 'files': manifest}
+
+
+def supervisor_status(returncode, parent_verified):
+    return 'completed' if returncode == 0 and parent_verified else 'failed'
 
 
 def media(path, audio=False):
@@ -159,7 +206,11 @@ def worker(args, workspace, source, driving, base, output):
     require(torch.cuda.device_count() == 1, 'exactly one visible CUDA device required')
     code = code_check()
     inputs_before = {str(p): sha256(p) for p in (source, driving)}
-    driver_video = check_video(media(driving), square=True)
+    driver_video = check_driver(media(driving))
+    cache = load_source_cache(args.source_cache, workspace, source, code) if args.source_cache else None
+    cached_canvas = np.asarray(Image.open(cache['canvas_path']).convert('RGB')) if cache else None
+    if cache:
+        require(array_hash(cached_canvas) == cache['report']['source_canvas']['array_sha256'], 'cached canvas differs')
     audio_before = audio_signature(media(driving, audio=True))
     ac = ArgumentConfig(source=str(source), driving=str(driving), output_dir=str(output))
     explicit = dict(flag_relative_motion=True, flag_stitching=True, flag_normalize_lip=True,
@@ -243,12 +294,24 @@ def worker(args, workspace, source, driving, base, output):
         w = pipe.live_portrait_wrapper
         require(len(load_checks) >= 7, 'missing base/retarget state load evidence')
         state_before = state_hash(w)
+        if cache:
+            require(state_before == cache['report']['base_before'] and weights_before == cache['report']['weights_before'], 'cache base/weights differ')
+        driving_crop_calls = []
+        original_driving_crop = pipe.cropper.crop_driving_video
+        def driving_crop_hook(*a, **kw):
+            driving_crop_calls.append(True)
+            return original_driving_crop(*a, **kw)
+        patch(pipe.cropper, 'crop_driving_video', driving_crop_hook)
         original_crop = pipe.cropper.crop_source_image
 
         def crop_hook(image, *a, **kw):
             nonlocal canvas, mask
             require(canvas is None, 'source may only be detected once')
-            result = original_crop(image, *a, **kw)
+            if cache:
+                require(np.array_equal(image, cached_canvas), 'source canvas does not match cache')
+                result = {k: v.copy() for k, v in cache['crop'].items()}
+            else:
+                result = original_crop(image, *a, **kw)
             require(result is not None, 'source face not detected')
             canvas = image.copy()
             for k, v in result.items():
@@ -266,7 +329,11 @@ def worker(args, workspace, source, driving, base, output):
 
         def extract_hook(x):
             require('F' not in arrays, 'source F must be computed once')
-            result = original_extract(x)
+            if cache:
+                require(array_hash(arr(x)) == array_hash(cache['arrays']['source_input']), 'prepared source input differs from cache')
+                result = torch.from_numpy(cache['arrays']['F']).to(device=x.device)
+            else:
+                result = original_extract(x)
             arrays.update(source_input=arr(x), F=arr(result))
             return result
 
@@ -305,6 +372,8 @@ def worker(args, workspace, source, driving, base, output):
             if frame_index % 25 == 0:
                 budget(workspace, base)
             require(array_hash(arr(f)) == array_hash(arrays['F']), 'source feature changed')
+            if cache:
+                require(array_hash(arr(xs)) == array_hash(cache['arrays']['x_s']), 'source xs differs from cache; no tolerance')
             if 'x_s' not in arrays:
                 arrays['x_s'] = arr(xs)
             require(np.array_equal(arr(xs), arrays['x_s']), 'source keypoints changed')
@@ -345,6 +414,8 @@ def worker(args, workspace, source, driving, base, output):
         patch(pipeline_module, 'has_audio_stream', lambda *a, **kw: False)
         pipe.execute(ac)
         require(frame_index == 581 and len(dumped) == 1 and len(selected_hashes) == 9, 'incomplete pipeline output')
+        actual_driving_auto_crop = bool(driving_crop_calls)
+        require(len(driving_crop_calls) == int(driver_video['width'] != driver_video['height']), 'unexpected original driving auto-crop path')
         encoder.stdin.close()
         require(encoder.wait(timeout=60) == 0, 'stream encoder failed')
         arrays['final_k'] = np.stack(final_keys)
@@ -367,6 +438,8 @@ def worker(args, workspace, source, driving, base, output):
         inputs_after = {str(p): sha256(p) for p in (source, driving)}
         require(weights_before == weights_after and inputs_before == inputs_after, 'input/weight files changed')
         require(code_check() == code, 'code changed')
+        if cache:
+            require(all(sha256(p) == h for p, h in cache['files'].items()), 'source cache changed during run')
         report = {'status': 'completed', 'kind': 'A0 production snapshot; not tooth optimization', 'code_sha': code,
                   'cfg': serialize(cfg), 'cropcfg': serialize(cropcfg), 'ArgumentConfig': serialize(ac),
                   'weights_before': weights_before, 'weights_after': weights_after,
@@ -376,9 +449,15 @@ def worker(args, workspace, source, driving, base, output):
                   'source_canvas': serialize(canvas), 'selected_H': selected_hashes,
                   'motion_input_hashes': motion_inputs, 'template': template_meta, 'suppressed_dump': dumped,
                   'frames': records, 'nframes': frame_index, 'driver_video': driver_video,
+                  'actual_driving_auto_crop': actual_driving_auto_crop,
+                  'source_cache': None if cache is None else {'directory': str(Path(args.source_cache).resolve()),
+                      'files_before': cache['files'], 'files_after': {p: sha256(p) for p in cache['files']},
+                      'source_only': True, 'source_redetected': False, 'source_F_recomputed': False,
+                      'source_arrays_exact': {k: array_hash(arrays[k]) == array_hash(v) for k, v in cache['arrays'].items()}},
+                  'max_new_mib': args.max_new_mib,
                   'video_verification': verification, 'full_decode_passed': True,
                   'audio_before': audio_before, 'audio_after': audio_after, 'audio_exact': True,
-                  'files': {p.name: sha256(p) for p in output.iterdir() if p.is_file()},
+                  'files': {p.name: sha256(p) for p in output.iterdir() if p.is_file() and p.name not in ('report.json', 'supervisor.json')},
                   'environment': {'python': sys.version, 'torch': torch.__version__, 'cuda': torch.version.cuda,
                                   'numpy': np.__version__, 'cv2': cv2.__version__, 'imageio': imageio.__version__,
                                   'ffmpeg': command('ffmpeg', '-version').splitlines()[0],
@@ -432,14 +511,17 @@ class OwnedProcessGroup:
 
 
 def main():
+    global LIMIT
     started = time.monotonic()
     args = parser().parse_args()
+    LIMIT = args.max_new_mib * 2**20
     require(sys.platform == 'linux' and args.authorize_experimental, 'Linux and explicit authorization required')
     workspace, source, driving, base, output = check_paths(args)
     for key in ('HOME', 'TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'TORCH_HOME', 'HF_HOME', 'CUDA_CACHE_PATH'):
         require(bool(os.environ.get(key)), 'missing isolated ' + key)
         require(inside(os.environ[key], workspace).is_dir(), 'cache must exist')
     require(os.environ.get('PYTHONDONTWRITEBYTECODE') == '1', 'disable bytecode writes')
+    require(os.environ.get('IMAGEIO_FFMPEG_NO_PREVENT_SIGINT') == '1', 'ImageIO must inherit the owned process group')
     require(re.fullmatch(r'GPU-[0-9a-fA-F-]{36}', os.environ.get('CUDA_VISIBLE_DEVICES', '')), 'select one explicit CUDA UUID')
     code_check()
     if args._worker:
@@ -451,37 +533,63 @@ def main():
         return
     require(not output.exists() and not Path(args.output).is_symlink(),
             'refuse existing output; never delete artifacts')
-    initial_budget = budget(workspace, base)
-    output.mkdir(parents=True)
-    env = dict(os.environ, UPPER_SNAPSHOT_PARENT=str(os.getpid()),
-               CUBLAS_WORKSPACE_CONFIG=':4096:8')
-    for key in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
-        env[key] = '4'
-    process = subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()), *sys.argv[1:], '--_worker'],
-                               cwd=ROOT, env=env, start_new_session=True)
-
-    owned = OwnedProcessGroup(process)
-    timer = threading.Timer(max(0, 600 - (time.monotonic() - started)), owned.kill)
-    timer.daemon = True
-    timer.start()
-    try:
-        while not owned.exited():
-            require(time.monotonic() - started < 600, '600s hard timeout')
-            budget(workspace, base)
-            time.sleep(.5)
-        owned.finish()
-        require(process.returncode == 0, 'snapshot worker failed; partial output is not accepted')
-        final_budget = budget(workspace, base)
-        report_path = output / 'report.json'
-        report = json.loads(report_path.read_text())
-        report.update(wall_seconds=time.monotonic() - started, supervisor_verified=True,
-                      budget_before=initial_budget, budget_after=final_budget)
-        report_path.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
-    finally:
-        timer.cancel()
-        owned.finish()
-        (output / 'supervisor.json').write_text(json.dumps({'returncode': process.returncode,
-            'wall_seconds': time.monotonic() - started, 'hard_limit_seconds': 600}) + '\n', encoding='utf-8')
+    import fcntl
+    sys.path.insert(0, str(ROOT))
+    from scripts.run_contact_release import elapsed_charge, read_json, write_json
+    base.mkdir(parents=True, exist_ok=True)
+    with (base / 'source-mouth.lock').open('a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        previous = elapsed_charge(base)
+        require(previous + 600 <= 1800, 'cumulative 1800s allocation exhausted')
+        initial_budget = budget(workspace, base)
+        output.mkdir(parents=True)
+        write_json(output / 'supervisor.json', {'status': 'running', 'stage': 'snapshot'})
+        process = owned = timer = None
+        verified, error = False, None
+        try:
+            env = dict(os.environ, UPPER_SNAPSHOT_PARENT=str(os.getpid()), CUBLAS_WORKSPACE_CONFIG=':4096:8')
+            for key in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+                env[key] = '4'
+            process = subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()), *sys.argv[1:], '--_worker'],
+                                       cwd=ROOT, env=env, start_new_session=True)
+            owned = OwnedProcessGroup(process)
+            timer = threading.Timer(max(0, 585 - (time.monotonic() - started)), owned.kill)
+            timer.daemon = True
+            timer.start()
+            while not owned.exited():
+                require(time.monotonic() - started < 585, 'worker timeout; final audit margin reserved')
+                budget(workspace, base)
+                time.sleep(.5)
+            owned.finish()
+            require(process.returncode == 0, 'snapshot worker failed; partial output is not accepted')
+            report = read_json(output / 'report.json', 32 * 2**20)
+            require(report['status'] == 'completed' and report['full_decode_passed'] is True, 'worker snapshot incomplete')
+            report.update(budget_before=initial_budget, budget_after=budget(workspace, base))
+            write_json(output / 'report.json', report)
+            verified = True
+        except BaseException as exc:
+            error = repr(exc)
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
+            if owned is not None:
+                owned.finish()
+            wall = time.monotonic() - started
+            verified = verified and wall <= 600 and previous + wall <= 1800
+            rc = None if process is None else process.returncode
+            status = supervisor_status(rc, verified)
+            record = {'status': status, 'stage': 'snapshot', 'returncode': rc, 'error': error,
+                      'wall_seconds': wall, 'cumulative_wall_seconds': previous + wall, 'hard_limit_seconds': 600}
+            path = output / 'report.json'
+            try:
+                report = read_json(path, 32 * 2**20) if path.exists() else {}
+            except (ValueError, OSError):
+                report = {}
+            report.update(status=status, supervisor_verified=verified, wall_seconds=wall, supervisor=record)
+            write_json(path, report)
+            write_json(output / 'supervisor.json', record)
+        require(verified, 'snapshot final supervisor audit failed')
 
 
 if __name__ == '__main__':

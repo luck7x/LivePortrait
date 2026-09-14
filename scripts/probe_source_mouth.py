@@ -28,6 +28,7 @@ from scripts.probe_upper_tail_capacity import bounded_npz
 
 OLD = '55f865447014b0c35bc6aca3bdc32648937b9f8ceb6c4a420a43a9fdf251032c'
 NEW = '7aa906e3135b1c7c903c3c1057f4fe6c66bb33f4d59c8390d11258c14329226a'
+TWO_DRIVER_SOURCE = 'ded9d6ed7facbf5bf2646e982858d87ffc7ebd45b110a95706df60157f3fbed2'
 STUDENT = '32e108b4258cd7c5c6fcf4b4a09cd1e20369a8cddc3183821106d841ac6c2b2c'
 SAMPLED = (0, 80, 116, 225, 226, 228, 251, 255, 260, 263, 266, 292, 348, 442, 446, 456, 470, 580)
 LIMIT = 512 * 2**20
@@ -56,7 +57,8 @@ def check_config(report, stage):
             cfg['driving_multiplier'] == 1 and cfg['animation_region'] == 'all' and
             cfg['driving_option'] == 'expression-friendly', 'unsupported ablation configuration')
     source = report['inputs_before'][report['ArgumentConfig']['source']]
-    require(source in (OLD, NEW) and (stage != 'student' or source == NEW), 'unapproved source/stage')
+    require((stage == 'student' and source == TWO_DRIVER_SOURCE) or
+            (stage == 'off' and source in (OLD, NEW)), 'unapproved source/stage; new source is on/student only')
     return source
 
 
